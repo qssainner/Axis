@@ -1,6 +1,6 @@
 # Axis
 
-一个受《Saltline》启发、主要由 **Fable 5.2** 通过程序化建模生成的单文件 WebGL2 3D 场景实验。  
+一个主要由 **Fable 5.2** 通过程序化建模生成的单文件 WebGL2 3D 场景实验。  
 不依赖 three.js 等 3D 引擎库，探索前沿大模型在「纯代码画场景」上的能力边界。
 
 > **在线体验**：[https://qssainner.github.io/Axis/](https://qssainner.github.io/Axis/)  
