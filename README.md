@@ -6,6 +6,7 @@
 > **在线体验**：[https://qssainner.github.io/Axis/](https://qssainner.github.io/Axis/)  
 > 当前公开版本为**场景展示版**（已裁去未打磨完成的玩法部分），仅提供维度宫殿漫游体验。
 
+![Axis 场景预览](./preview.gif)
 
 ---
 
