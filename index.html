@@ -16,6 +16,8 @@
   #sig path{fill:none;stroke:#f1f3f8;stroke-linecap:round}
   #sig .d{stroke-dasharray:1;stroke-dashoffset:1;animation:draw var(--t,1.5s) cubic-bezier(.6,0,.2,1) var(--w,0s) forwards}
   @keyframes draw{to{stroke-dashoffset:0}}
+  .say{position:fixed;left:0;top:0;opacity:0;pointer-events:none;white-space:nowrap;color:#eef2ff;font-size:clamp(15px,1.75vw,26px);letter-spacing:.42em;text-indent:.42em;text-shadow:0 0 16px rgba(140,175,255,.8),0 0 3px rgba(255,255,255,.7),0 0 10px rgba(3,5,12,1),0 0 26px rgba(3,5,12,1),0 0 44px rgba(3,5,12,.9);will-change:transform,opacity}
+  .say.warm{color:#ffeac0;text-shadow:0 0 20px rgba(255,182,78,.85),0 0 6px rgba(255,238,200,.75),0 0 14px rgba(6,4,2,1),0 0 30px rgba(6,4,2,.95);will-change:transform,opacity,filter,letter-spacing}
   #err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:30px;text-align:center;color:#c9cfdf;font-size:15px;line-height:1.9;background:#05060a}
 </style>
 </head>
@@ -379,9 +381,12 @@ float fbm5(vec3 p){float a=.5,s=0.;for(int i=0;i<5;i++){s+=a*vnoise(p);p=p*2.03+
    所以走过的地方在身后会退回线稿。边界是一排顺着竖向抽出去的细丝和一道干净的亮边，没有碎点。
    uEdge 是边界那道光的强弱：玩家在走时最亮，久站不动就慢慢暗下去。 */
 const FORM=`
-uniform vec3 uForm;uniform float uEdge;
+uniform vec3 uForm;uniform float uEdge;uniform vec4 uGone;
+/* 流程里的消散：uGone.x 是一道沿 z 扫过去的边界（z 比它大的都没了）；uGone.y 是环门自己散掉的程度 */
+float goneK(vec3 p){float k=uGone.x>5e3?0.:smoothstep(uGone.x-4.,uGone.x+4.,p.z+(vnoise(p*.21)-.5)*9.);     // 平时不消散：不必算那一遍噪声
+  if(p.z<-149.15&&p.y>2.46)k=max(k,smoothstep(0.,.25,uGone.y*1.3-.05-vnoise(p*.55)));return k;}
 float formBase(vec3 p){float m=smoothstep(45.,10.,distance(p.xz,uForm.xy))*uForm.z;
-  return m*1.25-clamp((p.y-2.5)/24.,0.,1.)*.3+(vnoise(p*.22)-.5)*.3;}
+  return m*1.25-clamp((p.y-2.5)/24.,0.,1.)*.3+(vnoise(p*.22)-.5)*.3-goneK(p)*3.;}
 float formT(vec3 p,float delay,float seed){return formBase(p)-delay*.5+(seed-.5)*.05+(vnoise(vec3(p.x*6.,p.y*.4,p.z*6.))-.5)*.045;}
 `;
 const SHADOW=`
@@ -413,6 +418,7 @@ HEAD+NOISE+FORM+SHADOW+LIGHT+`
 in vec3 vW;in vec3 vN;in vec2 vA;uniform vec3 uCam;uniform float uClip;out vec4 o;
 void main(){
   if(uClip>.5&&vW.y<0.)discard;
+  if(uGone.z>.5&&abs(vW.x)<8.05&&vW.z<-125.95&&vW.z>-150.55&&vW.y<2.45)discard;
   float t=formT(vW,vA.x,vA.y);
   if(t<.5)discard;
   float edge=1.-smoothstep(.5,.522,t);
@@ -437,7 +443,41 @@ void main(){
   o=vec4(col,1.);
 }`,['aPos','aNrm','aAux']);
 const P_depth=prog(SOLID_VS,
-HEAD+NOISE+FORM+`in vec3 vW;in vec3 vN;in vec2 vA;void main(){if(formT(vW,vA.x,vA.y)<.5)discard;}`,['aPos','aNrm','aAux']);
+HEAD+NOISE+FORM+`in vec3 vW;in vec3 vN;in vec2 vA;void main(){if(uGone.z>.5&&abs(vW.x)<8.05&&vW.z<-125.95&&vW.z>-150.55&&vW.y<2.45)discard;if(formT(vW,vA.x,vA.y)<.5)discard;}`,['aPos','aNrm','aAux']);
+/* 被花朵同化的高台与石阶：仅在回程花开后接管，呈比花朵更偏白的淡蓝半透明质感，两遍渲染避免内部叠面 */
+const P_platDepth=prog(SOLID_VS,
+HEAD+NOISE+FORM+`in vec3 vW;in vec3 vN;in vec2 vA;uniform float uClip;void main(){
+  if(uClip>.5&&vW.y<0.)discard;
+  if(!(abs(vW.x)<8.05&&vW.z<-125.95&&vW.z>-150.55&&vW.y<2.45))discard;
+  if(formT(vW,vA.x,vA.y)<.5)discard;
+}`,['aPos','aNrm','aAux']);
+const P_platFl=prog(SOLID_VS,
+HEAD+NOISE+FORM+LIGHT+`
+in vec3 vW;in vec3 vN;in vec2 vA;uniform vec3 uCam;uniform float uClip;uniform float uTime;out vec4 o;
+void main(){
+  if(uClip>.5&&vW.y<0.)discard;
+  if(!(abs(vW.x)<8.05&&vW.z<-125.95&&vW.z>-150.55&&vW.y<2.45))discard;
+  float t=formT(vW,vA.x,vA.y);
+  if(t<.5)discard;
+  float edge=1.-smoothstep(.5,.528,t);
+  vec3 N=normalize(vN);vec3 V=normalize(uCam-vW);if(dot(N,V)<0.)N=-N;
+  float n1=fbm3(vW*1.6),n2=fbm3(vW*4.2+vec3(0.,uTime*.04,0.));
+  float vein=smoothstep(.045,.0,abs(fbm3(vW*.85+n1*.9)-.5))*smoothstep(.25,.75,n2);            // 似花瓣脉络般的柔白蓝纹理
+  float topK=smoothstep(.45,.85,N.y);
+  float lip=smoothstep(.15,.0,abs(fract((vW.y+.002)/.2)-.98))*(1.-topK*.6);                  // 每级台阶上沿的微光折线，保证 12 级阶梯清晰可辨
+  float ndl=max(dot(N,uL),0.);
+  vec3 H=normalize(uL+V);float sp=pow(max(dot(N,H),0.),64.)*.9;
+  float fr=pow(1.-max(dot(N,V),0.),2.6);
+  vec3 Rr=reflect(-V,N);vec3 env=textureLod(uEnv,Rr,4.5).rgb*2.2+skyAmb(Rr)*1.1;
+  vec3 deepB=vec3(.12,.30,.85),paleB=vec3(.38,.60,1.),whiteB=vec3(.76,.88,1.);               // 与花朵同源但更偏白的淡蓝半透明质感，压低高光避免过曝盖住花朵
+  vec3 body=mix(mix(deepB,paleB,.35+.32*ndl+.20*n1),mix(paleB,whiteB,.38+.26*ndl+.16*n1),topK);
+  vec3 col=body*(.24+.28*ndl+.32*fr)+whiteB*(.16*vein+.26*lip+.36*fr*fr)+KEY*sp*.18+env*mix(.08,.45,fr)*.25+extraLight(vW,N)*.45;
+  col+=(edge*vec3(.72,.88,1.)*.55+exp(-(t-.5)*14.)*vec3(.45,.70,1.)*.16)*uEdge;
+  float alpha=clamp(mix(.24,.54,topK*.20+fr*.55+vein*.22+lip*.30),.22,.64);
+  float att=exp(-distance(uCam,vW)*.0028);
+  if(uClip>.5){float rf=mix(.18,1.,exp(-vW.y*.11));col*=rf;alpha*=rf;}
+  o=vec4(col*att,alpha);
+}`,['aPos','aNrm','aAux']);
 /* 虚影：线稿与实体之间的中间态。还没凝结的面先以半透明的薄壳出现 */
 const P_ghost=prog(SOLID_VS,
 HEAD+NOISE+FORM+`in vec3 vW;in vec3 vN;in vec2 vA;uniform vec3 uCam;out vec4 o;
@@ -500,7 +540,7 @@ void main(){
    表面上不画任何东西：没有路引，没有圆片，没有可走范围的边线，水池也没有那一圈。 */
 const P_water=prog(HEAD+`in vec2 aP;uniform mat4 uVP;uniform vec3 uCam;out vec3 vW;void main(){vW=vec3(aP.x*900.+uCam.x,0.,aP.y*900.+uCam.z);gl_Position=uVP*vec4(vW,1.);}`,
 HEAD+NOISE+STARS+SKYF+`
-in vec3 vW;uniform vec3 uCam;uniform sampler2D uRefl;uniform sampler2D uUnder;uniform vec2 uRes;uniform float uTime;uniform vec4 uGlow;uniform vec4 uStk[8];uniform float uRL;out vec4 o;
+in vec3 vW;uniform vec3 uCam;uniform sampler2D uRefl;uniform sampler2D uUnder;uniform vec2 uRes;uniform float uTime;uniform vec4 uGlow;uniform vec4 uStk[8];uniform float uWA;uniform float uRL;out vec4 o;
 const vec2 K[8]=vec2[8](vec2(-.33,-.9),vec2(.42,-.55),vec2(-.75,-.2),vec2(.1,-.1),vec2(.8,.15),vec2(-.45,.4),vec2(.35,.62),vec2(-.1,.95));
 float streaks(vec3 P,vec3 rd){
   vec3 rr=refract(rd,vec3(0.,1.,0.),.75);float acc=0.,px=length(fwidth(P.xz));
@@ -531,7 +571,7 @@ void main(){
   vec3 col=vec3(.003,.004,.008)+refl*F+under+warm;
   col+=vec3(.70,.80,1.)*streaks(P,-V)*.55*exp(-dist*.02);
   col*=exp(-dist*.0028);
-  o=vec4(col,1.);
+  o=vec4(col,uWA);
 }`,['aP']);
 
 /* ── lines ──
@@ -570,11 +610,11 @@ void main(){
     else if(type<1.5)a=mix(.17,0.,f)+front*.14;
     else{float c=floor(vW.y*3.2+uTime*(.8+seed*2.2));float dsh=step(.5,hash11(c+seed*91.));float head=pow(hash11(c*1.7+seed*13.),8.);
       a=(mix(.26,.12,f)+front*.10)*dsh+head*.6;}
-    a*=bright;
+    a*=bright*(1.-goneK(vW));
     float shd=shadow1(vW);
     col=mix(vec3(.42,.52,.92)*.55,vec3(1.,.955,.87)*1.25,shd*.85);    // 线条先于实体被光照亮
     col=mix(col,vec3(1.,.86,.62)*1.1,step(.93,seed)*.6);
-    {float dm=smoothstep(12.5,16.,vW.y)*exp(-pow((t-.46)/.21,2.))*uEdge;col=mix(col,vec3(.28,.5,1.)*1.6,min(dm*1.25,1.));a+=dm*.4*bright;}   // 高处（拱顶、穹顶）的线在转化边缘前后泛起蓝光，和柱身上的那道光呼应
+    {float dm=smoothstep(12.5,16.,vW.y)*exp(-pow((t-.46)/.21,2.))*uEdge;col=mix(col,vec3(.28,.5,1.)*1.6,min(dm*1.25,1.));a+=dm*.4*bright*(1.-goneK(vW));}   // 高处（拱顶、穹顶）的线在转化边缘前后泛起蓝光，和柱身上的那道光呼应
     a*=mix(.06,.5,step(1.45,bright))+.94*exp(-dist*.024);             // 尽头的环门从很远就看得见：它是标题里 X 上方的那个圆
     a*=exp(-max(vW.y-24.,0.)/14.);
     if(uClip>.5)a*=mix(.3,1.,exp(-vW.y*.06));
@@ -609,7 +649,7 @@ void main(){
   vP=P;vK=uLay.y;gl_Position=uVP*vec4(EY+(W0-EY)*(1.-(dz+uLay.x)/${GF(-135-(-380))}),1.);}`,
 HEAD+NOISE+`
 in vec2 vP;in float vK;uniform sampler2D uLt;uniform sampler2D uTt;uniform sampler2D uGt;uniform sampler2D uEt;uniform sampler2D uTEt;uniform sampler2D uFt;uniform sampler2D uTFt;
-uniform float uTime;uniform float uGain;uniform vec4 uA;uniform vec4 uFk;uniform vec4 uB;out vec4 o;
+uniform float uTime;uniform float uGain;uniform float uDis;uniform vec4 uA;uniform vec4 uFk;uniform vec4 uB;out vec4 o;
 const vec2 S1=vec2(${GF(PALM.AX)},${GF(PALM.S1Y)}),PS=vec2(${GF(PALM.PW)},${GF(PALM.PH)}),E0=vec2(${GF(PALM.E.x0)},${GF(PALM.E.y0)}),ES=vec2(${GF(PALM.E.w)},${GF(PALM.E.h)}),FS=vec2(${GF(PALM.F.w)},${GF(PALM.F.h)}),FC=vec2(${GF(PALM.F.cx)},${GF(PALM.F.cy)});
 float in01(vec2 u){return step(0.,u.x)*step(u.x,1.)*step(0.,u.y)*step(u.y,1.);}
 /* 一片叶形花瓣的轮廓：从原点沿 dir 长出去，长 L、最宽处半宽 w；g 是长到了几成 */
@@ -619,30 +659,53 @@ float petal(vec2 p,float ang,float L,float w,float g,float px){
   return exp(-pow((abs(by)-pr)/(1.2*px),2.))*smoothstep(g,g-.12,x)*smoothstep(0.,.1,x);}
 void main(){
   float I=0.,px=max(fwidth(vP.y),.6);vec2 d1=vP-S1,uv=vP/PS,gx=dFdx(uv),gy=dFdy(uv);float inP=in01(uv),tau=uA.x,cond=0.;
-  // —— 宫殿的线稿：顺着笔画长出来 ——
+  float dNoise=uDis>.001?fbm3(vec3(vP*.0032,uTime*.04)):0.;
+  float dDrift=uDis>.001?smoothstep(0.,1.,uDis):0.;
+  vec2 dW=dDrift>0.?vec2(vnoise(vec3(vP*.009,uTime*.12)),vnoise(vec3(vP*.009+7.3,uTime*.12)))-.5:vec2(0.);
+  // —— 宫殿的线稿：顺着笔画长出来；消失时如水墨晕散在黑暗中 ——
   if(inP>.5&&tau>0.){
     float T=textureLod(uTt,uv,0.).r,a=tau-T;cond=smoothstep(0.,.05,a);
-    if(a>-.06){
-      float rev=smoothstep(0.,.012,a),tip=exp(-a*a/.0005)*step(0.,a),l=textureGrad(uLt,uv,gx*.55,gy*.55).r,mn=clamp(log2(max(length(gx),length(gy))*${GF(2560)})*.5,0.,1.5);
-      I+=pow(l,1.35)*(1.35+.55*mn)*rev*(1.+1.8*tip+.16*sin(T*150.-uTime*.8)*smoothstep(.03,.1,a));
+    float disK=dDrift>0.?smoothstep(0.,.72,uDis*1.25-(1.-T)*.36-dNoise*.26+.08):0.;
+    float keep=1.-disK;
+    if(a>-.06&&keep>.001){
+      float rev=smoothstep(0.,.012,a),tip=exp(-a*a/.0005)*step(0.,a);
+      float baseLod=max(0.,log2(max(length(gx),length(gy))*${GF(2560)}));
+      float mn=clamp(baseLod*.5,0.,1.5);
+      float blurK=dDrift>0.?clamp(max(disK,pow(uDis,.65)*1.12),0.,1.):0.;
+      if(blurK>.001){
+        vec2 uvd=clamp(uv+dW*(.028*blurK),0.,1.);
+        float lSharp=textureGrad(uLt,uv,gx*.55,gy*.55).r;
+        float lod=baseLod+.55+blurK*4.0,br=.0025+.024*blurK;                                 // 从真实屏幕 mip 起步并迅速退去锐利原线，第 15 阶起即肉眼可见地晕散
+        float lBleed=(textureLod(uLt,uvd,lod).r*2.
+          +textureLod(uLt,clamp(uvd+vec2(br,0.),0.,1.),lod).r
+          +textureLod(uLt,clamp(uvd-vec2(br,0.),0.,1.),lod).r
+          +textureLod(uLt,clamp(uvd+vec2(0.,br),0.,1.),lod).r
+          +textureLod(uLt,clamp(uvd-vec2(0.,br),0.,1.),lod).r)/6.;
+        float l=mix(pow(lSharp,1.35)*(1.35+.55*mn),lBleed*1.25,smoothstep(0.,.22,uDis));
+        I+=l*rev*keep*(1.+1.8*tip+.16*sin(T*150.-uTime*.8)*smoothstep(.03,.1,a));
+      }else{
+        float l=textureGrad(uLt,uv,gx*.55,gy*.55).r;
+        I+=pow(l,1.35)*(1.35+.55*mn)*rev*(1.+1.8*tip+.16*sin(T*150.-uTime*.8)*smoothstep(.03,.1,a));
+      }
       float pre=smoothstep(-.06,0.,a)*(1.-rev);
       if(pre>.001){vec2 w=vec2(vnoise(vec3(vP*.011,uTime*.22)),vnoise(vec3(vP*.011+7.,uTime*.22)))-.5;
-        I+=textureLod(uLt,uv+w*.012*(1.-.6*pre),1.5+2.5*(1.-pre)).r*pre*.4;}
+        I+=textureLod(uLt,uv+w*.012*(1.-.6*pre),1.5+2.5*(1.-pre)).r*pre*.4*keep;}
     }
     // 原图里的光：跟着生长亮起来，被缓缓飘动的帘幕调制
     float Tb=textureLod(uTt,uv,5.).r,gl=smoothstep(-.02,.22,tau-Tb);
-    if(gl>0.){float g=textureLod(uGt,uv,0.).r,cur=.5+1.1*vnoise(vec3(vP.x*.007+.5*sin(vP.y*.002+uTime*.06),vP.y*.0011-uTime*.035,uTime*.05));
-      I+=g*g*.8*gl*cur*(.45+.7*uB.x)*smoothstep(0.,.14,uv.y);}
+    if(gl>0.&&keep>.001){float g=textureLod(uGt,clamp(uv+dW*(.024*max(disK,uDis*.9)),0.,1.),max(disK,uDis)*3.2).r,cur=.5+1.1*vnoise(vec3(vP.x*.007+.5*sin(vP.y*.002+uTime*.06),vP.y*.0011-uTime*.035,uTime*.05));
+      I+=g*g*.8*gl*cur*(.45+.7*uB.x)*smoothstep(0.,.14,uv.y)*keep;}
   }
   if(vK>.5){
+    float keepO=dDrift>0.?1.-smoothstep(0.,.74,uDis*1.22-dNoise*.30+.06):1.;
     // —— 极光：顶上落下的光柱，和宫殿上方垂着的光帘 ——
-    if(uB.x>0.){
+    if(uB.x>0.&&keepO>.001){
       float wd=95.+.11*max(S1.y-vP.y,0.),x=d1.x/wd;
       float stv=.25+.5*vnoise(vec3(vP.x*.03,vP.y*.0013+uTime*.06,uTime*.04))+.5*vnoise(vec3(vP.x*.011+3.,vP.y*.0007+uTime*.035,uTime*.03));
-      I+=exp(-x*x)*stv*smoothstep(S1.y+120.,500.,vP.y)*smoothstep(-1000.,-100.,vP.y)*.34*uB.x;
+      I+=exp(-x*x)*stv*smoothstep(S1.y+120.,500.,vP.y)*smoothstep(-1000.,-100.,vP.y)*.34*uB.x*keepO;
     }
     // —— 形状1 与两侧的烟臂 ——
-    if(uA.y>0.&&uA.z<1.){
+    if(uA.y>0.&&uA.z<1.&&keepO>.001){
       vec2 ue=(S1+d1/uB.w-E0)/ES;float side=ue.x-.5,arm=smoothstep(.1,.46,abs(side)),dis=uA.z;
       vec2 fl=vec2(0.,arm*.028*sin(abs(side)*24.-uTime*1.5)+arm*.02*(vnoise(vec3(ue*vec2(9.,5.),uTime*.4))-.5));    // 烟臂是在流的：一道道波从形状1 向两端传过去
       fl+=dis*vec2(sign(side)*.03*arm,-.16*(.4+vnoise(vec3(ue*6.,uTime*.3))))*(.3+arm);                               // 散去时向上、向外飘
@@ -650,32 +713,37 @@ void main(){
       if(in01(uq)>.5){float a=uA.y-textureLod(uTEt,ue,0.).r;
         if(a>-.05){float rev=smoothstep(0.,.03,a),tip=exp(-a*a/.003)*step(0.,a),pre=smoothstep(-.05,0.,a)*(1.-rev);
           float e=textureLod(uEt,uq,dis*4.5+max(0.,log2(px*${GF(1040/PALM.E.w)})-.4)).r*in01(uq*1.02-.01);
-          I+=(pow(e,1.6)*mix(1.05,1.6,arm)*rev*(1.+1.2*tip)+textureLod(uEt,uq,3.5).r*pre*.35)*pow(1.-dis,1.6)*(1.-.75*cond*(1.-arm));}}
+          I+=(pow(e,1.6)*mix(1.05,1.6,arm)*rev*(1.+1.2*tip)+textureLod(uEt,uq,3.5).r*pre*.35)*pow(1.-dis,1.6)*(1.-.75*cond*(1.-arm))*keepO;}}
     }
     // —— 开始的那一下：很亮的一点，十字的细芒伸出去再收回 ——
-    {float t=uA.w,r=length(d1),k=smoothstep(0.,.7,t)*(.1+1.6*exp(-max(t-.7,0.)*.6));
+    if(keepO>.001){float t=uA.w,r=length(d1),k=smoothstep(0.,.7,t)*(.1+1.6*exp(-max(t-.7,0.)*.6));
       float len=520.*smoothstep(.2,2.6,t)*(1.-.85*smoothstep(4.,10.,t)),nw=1.4*px;
       float nd=exp(-pow(d1.y/nw,2.))*smoothstep(len,0.,abs(d1.x))+exp(-pow(d1.x/nw,2.))*smoothstep(len*.62,0.,abs(d1.y));
-      I+=k*(exp(-r*r/900.)*1.6+exp(-r/70.)*.22+nd*.9)*(1.-.6*cond);}
+      I+=k*(exp(-r*r/900.)*1.6+exp(-r/70.)*.22+nd*.9)*(1.-.6*cond)*keepO;}
     // —— 形状1 与雪花之间垂着的烟：雪花越沉越远，这些丝越抽越长，随后被凝出来的塔身取代 ——
     float v=(vP.y-S1.y-40.)/max(uFk.y-S1.y-40.,1.);
-    if(uB.y>0.&&v>0.&&v<1.){
+    if(uB.y>0.&&v>0.&&v<1.&&keepO>.001){
       float wd=70.+150.*pow(sin(3.14159*v),1.5)*smoothstep(0.,300.,uFk.y-S1.y),acc=0.;
       for(int i=0;i<7;i++){float fi=float(i),xo=wd*(fi/3.-1.)*(.75+.25*sin(vP.y*.011+fi*2.1+uTime*.45))+10.*sin(vP.y*.03+fi+uTime*.7);
         acc+=exp(-pow((d1.x-xo)/(1.6*px+7.*v*(1.-v)),2.))*(.45+.55*sin(vP.y*.021-uTime*1.1+fi*1.7));}
-      I+=acc*.2*uB.y*smoothstep(0.,.08,v)*smoothstep(1.,.85,v)*(1.-cond);
+      I+=acc*.2*uB.y*smoothstep(0.,.08,v)*smoothstep(1.,.85,v)*(1.-cond)*keepO;
     }
     // —— 雪花形：像霜一样从中心沿着枝杈结出来；落定后外面张开一圈花瓣 ——
-    if(uFk.z>0.){
+    if(uFk.z>0.&&keepO>.001){
       vec2 q=vP-uFk.xy,uf=q/(FS*uB.z)+FC;
+      float disF=dDrift>0.?clamp(max(1.-keepO,pow(uDis,.65)*1.12),0.,1.):0.;
       if(in01(uf)>.5){float a=uFk.z-textureLod(uTFt,uf,0.).r;
         if(a>-.05){float rev=smoothstep(0.,.03,a),tip=exp(-a*a/.004)*step(0.,a),pre=smoothstep(-.05,0.,a)*(1.-rev);
-          I+=pow(textureLod(uFt,uf,max(0.,log2(px*${GF(440/PALM.F.w)}/uB.z)-.4)).r,1.4)*1.9*rev*(1.+1.8*tip)+textureLod(uFt,uf,3.).r*pre*.5;}}
-      if(uFk.w>0.){vec2 p=vec2(abs(q.x),-q.y-10.);float g=uFk.w*1.15,pt=0.;
-        pt+=petal(p,.62,300.,34.,g,px)+petal(p,1.08,330.,30.,g-.08,px)+petal(p,-.16,330.,36.,g-.04,px)+petal(p,-.42,290.,30.,g-.12,px);
-        I+=pt*.4*(.8+.2*sin(uTime*.7));}
+          float fLod=max(0.,log2(px*${GF(440/PALM.F.w)}/uB.z)-.4)+disF*4.0,fr=.006+.028*disF;
+          vec2 ufd=clamp(uf+dW*(.034*disF),0.,1.);
+          float fVal=disF>.001?(textureLod(uFt,ufd,fLod).r*2.+textureLod(uFt,clamp(ufd+vec2(fr,0.),0.,1.),fLod).r+textureLod(uFt,clamp(ufd-vec2(fr,0.),0.,1.),fLod).r+textureLod(uFt,clamp(ufd+vec2(0.,fr),0.,1.),fLod).r+textureLod(uFt,clamp(ufd-vec2(0.,fr),0.,1.),fLod).r)/6.:textureLod(uFt,uf,fLod).r;
+          I+=(pow(fVal,1.4)*1.9*rev*(1.+1.8*tip)+textureLod(uFt,uf,3.).r*pre*.5)*keepO;}}
+      if(uFk.w>0.){vec2 p=vec2(abs(q.x),-q.y-10.)+dW*(16.*disF);float g=uFk.w*1.15,pt=0.,ppx=px*(1.+disF*5.5);
+        pt+=petal(p,.62,300.,34.,g,ppx)+petal(p,1.08,330.,30.,g-.08,ppx)+petal(p,-.16,330.,36.,g-.04,ppx)+petal(p,-.42,290.,30.,g-.12,ppx);
+        I+=pt*.4*(.8+.2*sin(uTime*.7))*keepO*exp(-disF*2.4);}
     }
   }
+  I*=1.-smoothstep(.86,1.,uDis);
   o=vec4(vec3(.88,.92,1.)*I*uGain*vK,0.);
 }`,['aP']);
 const palTex={},PALU={uLt:['L',10],uTt:['T',11],uGt:['G',12],uEt:['E',13],uTEt:['TE',14],uFt:['F',15],uTFt:['TF',16]};let palReady=false;
@@ -685,9 +753,9 @@ const palTex={},PALU={uLt:['L',10],uTt:['T',11],uGt:['G',12],uEt:['E',13],uTEt:[
     if(ims.some(i=>!i)){console.error('palace textures failed to decode');return;}
     gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL,gl.NONE);
     names.forEach((k,i)=>{const im=ims[i],t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
-      if(k[0]==='T'){                                   // 出生时刻图：11 位（R 高 8 位、G 的最高 3 位），解成浮点
+      if(k[0]==='T'){                                   // 出生时刻图：16 位（R 高字节、G 低字节），解成浮点
         const c=document.createElement('canvas');c.width=im.width;c.height=im.height;const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(im,0,0);
-        const d=x.getImageData(0,0,im.width,im.height).data,f=new Float32Array(im.width*im.height);for(let j=0;j<f.length;j++)f[j]=(d[j*4]*8+(d[j*4+1]>>5))/2047;
+        const d=x.getImageData(0,0,im.width,im.height).data,f=new Float32Array(im.width*im.height);for(let j=0;j<f.length;j++)f[j]=(d[j*4]*256+d[j*4+1])/65535;
         gl.texImage2D(gl.TEXTURE_2D,0,gl.R16F,im.width,im.height,0,gl.RED,gl.FLOAT,f);
       }else gl.texImage2D(gl.TEXTURE_2D,0,gl.R8,gl.RED,gl.UNSIGNED_BYTE,im);
       gl.generateMipmap(gl.TEXTURE_2D);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
@@ -803,7 +871,7 @@ in vec3 aPos;in vec4 aI;uniform mat4 uVP;uniform float uS;uniform float uG;unifo
 void main(){
   float u=aI.x,seed=aI.y,lead=aI.z<.5?1.:0.,n=float(gl_InstanceID);
   float kr=step(mod(n,8.),.5)*(1.-lead)*smoothstep(0.,1.,clamp(uRg.w*1.5-seed*.5,0.,1.)),G=uG;
-  float w=smoothstep(.5,-1.2,path(uS).y);                              // 整体潜到水下的程度
+  float w=smoothstep(1.2,-.1,path(uS).y);                              // 只要潜到水下即转为金水母形态
   float s=uS-pow(u,1.4)*mix(16.,5.,w)*(1.-G);
   vec3 c=path(s);
   vec3 off=(vec3(hash11(seed*17.),hash11(seed*31.),hash11(seed*47.))-.5)*mix(.75,.0,G)*(.3+u);
@@ -1121,24 +1189,121 @@ const strandVAO=vao(()=>{
 
 
 const F={time:0,lightVP:null,formR:0};
-/* 花：几缕发着微光的细线从地面蜿蜒长上来，顶端结出花苞，再开成花。四种：扶桑、彼岸花、莲、掌花。 */
+/* ───────────────────────── 游戏化流程用到的画法 ─────────────────────────
+   · P_dim   一遍全屏的乘法：把已经画好的世界整体压暗（阶梯和远处的宫殿在它之后才画，所以不受影响）
+   · P_sl    每帧重建的线：阶梯的线稿、占位的方块
+   · P_ss    每帧重建的实体：脚下那一两级凝成石头的踏板
+   · P_fl    花：几缕发着微光的细线从地面蜿蜒长上来，顶端结出花苞，再开成花。四种：扶桑、彼岸花、莲、掌花。 */
+const P_dim=prog(FSQ,HEAD+`in vec2 vUv;uniform float uK;uniform float uC;uniform mat4 uInvVP;uniform vec3 uCam;out vec4 o;
+void main(){vec4 h=uInvVP*vec4(vUv*2.-1.,1.,1.);vec3 rd=normalize(h.xyz/h.w-uCam);
+  o=vec4(uK*(1.-smoothstep(uC-.75,uC+.75,rd.z+.25*rd.y)));}`);     // uC 从 +1.8（哪儿都不暗）走到 −1.8（全黑）：黑暗从身后漫到面前
+function dimPass(invVP,eye){gl.useProgram(P_dim.p);gl.uniform1f(P_dim.u.uK,1-G.dim);gl.uniform1f(P_dim.u.uC,1.8-3.6*G.dk);gl.uniformMatrix4fv(P_dim.u.uInvVP,false,invVP);gl.uniform3fv(P_dim.u.uCam,eye);gl.drawArrays(gl.TRIANGLES,0,3);}
+const P_sl=prog(HEAD+`
+in vec2 aQ;in vec3 aA;in vec3 aB;in vec4 aC;uniform mat4 uVP;uniform vec2 uRes;uniform float uWidth;out vec3 vC;out float vSide;
+void main(){
+  vec4 ca=uVP*vec4(aA,1.),cb=uVP*vec4(aB,1.);const float NP=.06;
+  if(ca.w<NP&&cb.w<NP){gl_Position=vec4(2.,2.,2.,1.);return;}
+  if(ca.w<NP)ca=mix(ca,cb,(NP-ca.w)/(cb.w-ca.w));else if(cb.w<NP)cb=mix(ca,cb,(NP-ca.w)/(cb.w-ca.w));
+  vec2 na=ca.xy/ca.w,nb=cb.xy/cb.w;vec2 d=(nb-na)*uRes;float l=length(d);d=l>1e-5?d/l:vec2(1.,0.);vec2 nrm=vec2(-d.y,d.x);
+  float t=aQ.x;vec4 c=mix(ca,cb,t);float w=uWidth*aC.w;
+  c.xy+=(nrm*aQ.y*w+d*(t*2.-1.)*w*.5)/uRes*2.*c.w;c.z-=.0008*c.w;
+  gl_Position=c;vC=aC.rgb;vSide=aQ.y;}`,
+HEAD+`in vec3 vC;in float vSide;out vec4 o;void main(){float p=1.-abs(vSide);p=p*p*(3.-2.*p);o=vec4(vC*p,0.);}`,['aQ','aA','aB','aC']);
+const P_ss=prog(HEAD+`in vec3 aPos;in vec3 aNrm;in float aK;uniform mat4 uVP;out vec3 vW;out vec3 vN;out float vK;void main(){vW=aPos;vN=aNrm;vK=aK;gl_Position=uVP*vec4(aPos,1.);}`,
+HEAD+NOISE+`in vec3 vW;in vec3 vN;in float vK;uniform vec3 uCam;uniform vec3 uL;out vec4 o;
+void main(){
+  float n=vnoise(vW*vec3(7.,26.,7.))*.7+vnoise(vW*29.)*.3,t=vK*1.3-.14-n;if(t<0.)discard;     // 和连廊一样：是"凝"出来的，边界上有一道亮边
+  vec3 N=normalize(vN),V=normalize(uCam-vW);if(dot(N,V)<0.)N=-N;
+  float ndl=max(dot(N,uL),0.);vec3 alb=vec3(.4,.41,.45)*(.6+.6*fbm3(vW*4.)+.25*vnoise(vW*37.));
+  vec3 col=alb*(vec3(1.,.955,.89)*ndl*.3+mix(vec3(.05,.055,.075),vec3(.08,.095,.14),N.y*.5+.5)*1.25);
+  col+=vec3(.6,.75,1.)*exp(-t*13.)*.75;
+  o=vec4(col,1.);}`,['aPos','aNrm','aK']);
+/* 接引流程里的金色水母：复用 mercVAO。伞盖随 uC（收缩程度）一张一合；七缕串珠触须沿 uSpine 这条
+   跟随身体运动的链条拖在后面，转向时触须是被身体慢慢带过去的，而不是跟着伞盖整体转动 */
+const NSPINE=24;
+/* uM：回到连廊、浮出"水面"后变回水银浮游物的程度——伞盖收成一滴圆的水银，触须散成一串拖在后面的大小不一的珠子 */
+const JELLY_VS=HEAD+NOISE+`
+in vec3 aPos;in vec4 aI;uniform mat4 uVP;uniform float uTime;uniform vec3 uPos;uniform vec3 uDir;uniform float uScale;uniform float uC;uniform float uM;uniform float uSub;uniform vec3 uSpine[${NSPINE}];
+out vec3 vW;out vec3 vN;out float vK;out float vS;
+float jh(float n){return fract(sin(n)*43758.5453);}
+void main(){
+  float u=aI.x,seed=aI.y,lead=aI.z<.5?1.:0.,C=uC*(1.-uM);
+  float js=uScale*mix(1.,1.45,uSub*(1.-uM));                       // 隔着暗镜面看水下水母时略大一些，伞盖与七缕触须更清晰
+  vec3 fw=normalize(uDir);
+  vec3 rt=normalize(cross(fw,abs(fw.y)>.92?vec3(1.,0.,0.):vec3(0.,1.,0.)));
+  vec3 up=cross(rt,fw);
+  vec3 p,n;
+  if(lead>.5){
+    vec3 sc=mix(vec3(1.-.15*C,1.-.15*C,.56+.16*C),vec3(1.),uM);    // 收缩时伞盖变窄变高，舒张时摊平；变回水银时收成圆球
+    vec3 lp=aPos*sc;
+    lp.z-=.18*max(-aPos.z,0.)*(1.-.6*C)*(1.-uM);                  // 伞缘略向后卷，像一只倒扣的碗
+    float r=mix(.52,.34,uM)*js;
+    p=uPos+(rt*lp.x+up*lp.y+fw*lp.z)*r;
+    vec3 ln=normalize(aPos/sc);
+    n=normalize(rt*ln.x+up*ln.y+fw*ln.z);
+    vK=1.;vS=(1.-aPos.z)*.075;                                      // vS：从伞顶 0 到触须末梢 1，水银化沿它从头扫到尾
+  }else{
+    float k=floor(seed*7.);
+    float f=u*${(NSPINE-1).toFixed(1)};int i0=int(floor(f));int i1=min(i0+1,${NSPINE-1});float fr=f-float(i0);
+    vec3 c=mix(uSpine[i0],uSpine[i1],fr);
+    vec3 tg=uSpine[i1]-uSpine[i0];tg=length(tg)>1e-4?normalize(tg):-fw;
+    vec3 r2=normalize(cross(tg,abs(tg.y)>.92?vec3(1.,0.,0.):vec3(0.,1.,0.))),u2=cross(r2,tg);
+    float ang=k*.8976+u*1.1+.25*sin(uTime*.45+k);
+    float spread=(.27-.12*u)*js*(1.+.3*C*(1.-u));                 // 收缩一下，触须根部跟着张开一点
+    float w1=sin(uTime*1.5-u*6.2+k*1.3)*.09*u*js,w2=cos(uTime*1.2-u*5.1+k*2.1)*.07*u*js;
+    vec3 jo=(vec3(jh(seed*17.),jh(seed*31.),jh(seed*47.))-.5)*.75*(.3+u)*uScale;
+    c+=mix(r2*(cos(ang)*spread+w1)+u2*(sin(ang)*spread+w2),jo,uM);
+    float r=mix(mix(.066,.022,u)*(.75+.45*fract(seed*19.3))*js,mix(.05,.30,pow(seed,3.))*(1.-.7*u)*uScale,uM);
+    p=c+aPos*r;n=aPos;
+    vK=mix(.72,.30,u);vS=.15+u*.85;
+  }
+  vW=p;vN=n;gl_Position=uVP*vec4(vW,1.);
+}`;
+const P_jelly=prog(JELLY_VS,HEAD+`
+in vec3 vW;in vec3 vN;in float vK;in float vS;uniform vec3 uCam;uniform float uAlpha;uniform float uSw;out vec4 o;
+void main(){
+  if(uAlpha<=.002||vS<uSw)discard;                                // 已经浮出水面的部分换成水银去画
+  vec3 N=normalize(vN),V=normalize(uCam-vW);
+  float ndv=abs(dot(N,V)),fr=1.-ndv;
+  vec3 core=vec3(1.,.74,.38),rim=vec3(1.,.90,.62);
+  vec3 col=mix(core*.48,rim*1.45,pow(fr,1.45))*(.65+1.15*fr)*vK;
+  float a=clamp((.38+.58*fr)*vK*uAlpha,0.,1.);
+  col+=vec3(1.,.93,.78)*exp(-(vS-uSw)*38.)*2.4;                  // 水面划过身体的那一道亮线
+  o=vec4(col*a,0.);
+}`,['aPos','aI']);
+const P_jellyM=prog(JELLY_VS,MERC_FS.replace('in float vK;','in float vK;in float vS;').replace('uniform float uDim;','uniform float uDim;uniform float uSw;').replace('if(vW.y<0.)discard;','if(vS>uSw||vW.y<0.)discard;'),['aPos','aI']);
+/* 花阶梯的半透明下层踏板表面：仅下层板半透明，带极柔和的蓝银微光雾面 */
+const P_stSurf=prog(HEAD+`in vec3 aPos;in vec3 aUvA;uniform mat4 uVP;out vec3 vUvA;void main(){vUvA=aUvA;gl_Position=uVP*vec4(aPos,1.);}`,
+HEAD+`in vec3 vUvA;out vec4 o;
+void main(){
+  vec2 q=abs(vUvA.xy*2.-1.);
+  float edge=smoothstep(.72,1.,max(q.x,q.y));
+  float a=vUvA.z*(.11+.11*edge);
+  vec3 col=mix(vec3(.22,.32,.56),vec3(.44,.64,.96),edge);
+  o=vec4(col,a);
+}`,['aPos','aUvA']);
+
 const P_fl=prog(HEAD+`
 in vec4 aV;in vec4 aF0;in vec4 aF1;in vec4 aF2;uniform mat4 uVP;uniform vec3 uCam;uniform float uTime;uniform float uPx;uniform float uVary;
 out vec3 vQ;out float vI;
 float h1(float n){return fract(sin(n)*43758.5453);}
-float Hh,sd,sc;vec2 lean;
-vec3 axisP(float t){return vec3(lean.x*t*t+.014*sin(uTime*.7+sd*30.)*t*t,t*Hh,lean.y*t*t+.014*cos(uTime*.6+sd*17.)*t*t);}
+float Hh,sd,sc,swayK;vec2 lean;
+vec3 axisP(float t){return vec3(lean.x*t*t+swayK*sin(uTime*.7+sd*30.)*t*t,t*Hh,lean.y*t*t+swayK*cos(uTime*.6+sd*17.)*t*t);}
 /* 一条在竖直面里弯曲的中线：起始与花轴的夹角 a0，沿途每单位长度再转 c */
 vec2 arc(float a0,float c,float v){float cc=abs(c)<.06?(c<0.?-.06:.06):c,al=a0+cc*v;return vec2(cos(a0)-cos(al),sin(al)-sin(a0))/cc;}
 void main(){
-  sd=fract(aF0.w);float spd=1.+floor(aF0.w)*.7,ty=aF1.x;sc=aF1.w;
+  sd=fract(aF0.w);float spd=1.+floor(aF0.w)*.7,ty=aF1.x;sc=aF1.w;float mode=aF2.z;
   float age=(uTime-aF1.y)*spd*(.85+.3*h1(sd*7.1)),dis=smoothstep(aF1.z-6.5,aF1.z-.3,uTime),fade=1.-smoothstep(.6,1.,dis);   // dis：消散走到哪儿了
   if(age<=0.||fade<=0.){gl_Position=vec4(2.,2.,2.,1.);return;}
-  float g=smoothstep(0.,5.,age),bud=smoothstep(3.6,6.,age),b=smoothstep(6.,10.5,age);
-  Hh=(.36+.4*h1(sd*3.3)+(ty>.5&&ty<1.5?.18:0.))*sc;lean=(vec2(h1(sd*5.),h1(sd*9.))-.5)*.34*sc;
+  float g=mode>.5?smoothstep(0.,1.6,age):smoothstep(0.,5.,age);
+  float bud=mode>.5?smoothstep(.6,2.0,age):smoothstep(3.6,6.,age);
+  float b=mode>.5?smoothstep(1.5,3.8,age):smoothstep(6.,10.5,age);
+  if(mode>.5){Hh=aF2.w;lean=vec2(0.);swayK=.003;}
+  else{Hh=(.36+.4*h1(sd*3.3)+(ty>.5&&ty<1.5?.18:0.))*sc;lean=(vec2(h1(sd*5.),h1(sd*9.))-.5)*.34*sc;swayK=.014;}
   vec3 head=axisP(g),A=normalize(axisP(g+.02)-axisP(g-.02)),Rr=normalize(cross(vec3(.31,0.,.95),A)),Ff=cross(A,Rr);
   vec3 p;float I;float part=aV.x;
-  if(part<.5){                                                        // 茎：三缕细线，从地面散开的几点蜿蜒向上，在顶端并成一股
+  if(part<.5){                                                        // 茎：普通花从地面蜿蜒向上；阶梯花改由精准对齐花萼的渐变弧茎绘制
+    if(mode>.5){gl_Position=vec4(2.,2.,2.,1.);return;}
     float k=aV.y,t0=aV.z,t1=aV.z+.04,w0=sd*40.+k*2.1,tw=4.+3.*h1(sd+k*.37);
     vec3 a=axisP(t0*g)+vec3(cos(w0+t0*tw),0.,sin(w0+t0*tw))*.055*sc*pow(1.-t0,1.3)*(1.+.5*sin(t0*9.+k));
     vec3 c=axisP(t1*g)+vec3(cos(w0+t1*tw),0.,sin(w0+t1*tw))*.055*sc*pow(max(1.-t1,0.),1.3)*(1.+.5*sin(t1*9.+k));
@@ -1176,6 +1341,7 @@ void main(){
   float cy=cos(aF2.x),sy=sin(aF2.x);p=vec3(cy*p.x+sy*p.z,p.y,-sy*p.x+cy*p.z);   // 绕茎的转角
   vec3 wp=aF0.xyz+p;gl_Position=uVP*vec4(wp,1.);
   float br=uVary>.5?aF2.y*mix(1.,1.6,smoothstep(18.,46.,distance(aF0.xyz,uCam))):1.;   // 每朵各自的明暗；远处的再亮一点，纵深才接得上
+  if(aF2.z>.5)br=aF2.y*mix(1.,.28,smoothstep(3.,18.,distance(aF0.xyz,uCam)));          // 阶梯上的花：越远越淡，像沉在黑暗里
   vI=I*fade*smoothstep(0.,.6,age)*br;
 }`,HEAD+`in vec3 vQ;in float vI;uniform float uGain;out vec4 o;
 void main(){
@@ -1187,6 +1353,17 @@ void main(){
   else{float p=1.-abs(vQ.x);I=p*p*vI;col=vec3(.55,.76,1.);}
   o=vec4(col*I*uGain,0.);}`,['aV','aF0','aF1','aF2']);
 
+const DLMAX=24000,DL=new Float32Array(DLMAX*10),DSMAX=40*36,DS=new Float32Array(DSMAX*7),DTMAX=160*6,DT=new Float32Array(DTMAX*6);let dlN=0,dsN=0,dtN=0,dlBuf,dsBuf,dtBuf;
+const dlVAO=vao(()=>{
+  buf(new Float32Array([0,-1,1,-1,0,1,0,1,1,-1,1,1]));gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+  dlBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,dlBuf);gl.bufferData(gl.ARRAY_BUFFER,DL.byteLength,gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,3,gl.FLOAT,false,40,0);gl.vertexAttribDivisor(1,1);
+  gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,3,gl.FLOAT,false,40,12);gl.vertexAttribDivisor(2,1);
+  gl.enableVertexAttribArray(3);gl.vertexAttribPointer(3,4,gl.FLOAT,false,40,24);gl.vertexAttribDivisor(3,1);});
+const dsVAO=vao(()=>{dsBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,dsBuf);gl.bufferData(gl.ARRAY_BUFFER,DS.byteLength,gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,28,0);gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,3,gl.FLOAT,false,28,12);gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,1,gl.FLOAT,false,28,24);});
+const dtVAO=vao(()=>{dtBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,dtBuf);gl.bufferData(gl.ARRAY_BUFFER,DT.byteLength,gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,24,0);gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,3,gl.FLOAT,false,24,12);});
 let flVN=0;
 const flTpl=(()=>{const v=[],Q=(part,idx,a0,a1,b0,b1)=>v.push(part,idx,a0,b0,part,idx,a1,b0,part,idx,a1,b1,part,idx,a0,b0,part,idx,a1,b1,part,idx,a0,b1);
   for(let k=0;k<3;k++)for(let i=0;i<10;i++)Q(0,k,i/10,(i+1)/10,-1,1);
@@ -1199,8 +1376,8 @@ const flTplL=(()=>{const v=[],Q=(part,idx,a0,a1,b0,b1)=>v.push(part,idx,a0,b0,pa
   for(let j=0;j<12;j++)for(let i=0;i<3;i++)for(let s=0;s<2;s++)Q(1,j,s-1,s,i/3,(i+1)/3);
   for(let k=0;k<6;k++)for(let i=0;i<3;i++)Q(2,k,i/3,(i+1)/3,-1,1);
   flVNL=v.length/4;return buf(new Float32Array(v));})();
-const FL_STRIDE=12,FLN=new Float32Array(2048*FL_STRIDE),FLF=new Float32Array(2048*FL_STRIDE);
-/* 一片花：各有各的实例缓冲。每朵 12 个数：位置、随机数(+生长速度档)、种类、出生时刻、消散时刻、大小、绕茎的转角、亮度 */
+const FL_STRIDE=12,FLN=new Float32Array(4096*FL_STRIDE),FLF=new Float32Array(4096*FL_STRIDE);
+/* 一片花：各有各的实例缓冲。每朵 12 个数：位置、随机数(+生长速度档)、种类、出生时刻、消散时刻、大小、绕茎的转角、亮度、模式(0普通/1阶梯) */
 function mkFlowers(max){const s={max,n:0,dirty:false,d:new Float32Array(max*FL_STRIDE)};
   const mk=(tpl,key)=>vao(()=>{gl.bindBuffer(gl.ARRAY_BUFFER,tpl);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,0,0);
     s[key]=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,s[key]);gl.bufferData(gl.ARRAY_BUFFER,s.d.byteLength,gl.DYNAMIC_DRAW);
@@ -1208,9 +1385,10 @@ function mkFlowers(max){const s={max,n:0,dirty:false,d:new Float32Array(max*FL_S
     gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,4,gl.FLOAT,false,48,16);gl.vertexAttribDivisor(2,1);
     gl.enableVertexAttribArray(3);gl.vertexAttribPointer(3,4,gl.FLOAT,false,48,32);gl.vertexAttribDivisor(3,1);});
   s.vao=mk(flTpl,'buf');s.vaoL=mk(flTplL,'bufL');return s;}
+const FLOW_FL=mkFlowers(4096);
 /* 种一朵花（i 省略则追加）。speed：0 常速，1、2… 长得更快；death：到这个时刻（F.time）消散；seed 省略则随机 */
-function setFlower(s,i,x,y,z,type,birth,scale=1,speed=0,death=1e9,seed,yaw=0,br=1){s.d.set([x,y,z,(seed==null?R():seed)*.999+speed,type,birth,death,scale,yaw,br,0,0],i*FL_STRIDE);s.dirty=true;}
-function addFlower(s,x,y,z,type,birth,scale=1,speed=0,death=1e9,seed,yaw=0,br=1){if(s.n>=s.max)return -1;setFlower(s,s.n,x,y,z,type,birth,scale,speed,death,seed,yaw,br);return s.n++;}
+function setFlower(s,i,x,y,z,type,birth,scale=1,speed=0,death=1e9,seed,yaw=0,br=1,mode=0,fh=0){s.d.set([x,y,z,(seed==null?R():seed)*.999+speed,type,birth,death,scale,yaw,br,mode,fh],i*FL_STRIDE);s.dirty=true;}
+function addFlower(s,x,y,z,type,birth,scale=1,speed=0,death=1e9,seed,yaw=0,br=1,mode=0,fh=0){if(s.n>=s.max)return -1;setFlower(s,s.n,x,y,z,type,birth,scale,speed,death,seed,yaw,br,mode,fh);return s.n++;}
 function drawFlowers(s,VP,eye,px,gain=1,vary=0){if(!s.n)return;gl.useProgram(P_fl.p);gl.uniformMatrix4fv(P_fl.u.uVP,false,VP);gl.uniform3fv(P_fl.u.uCam,eye);gl.uniform1f(P_fl.u.uTime,F.time);gl.uniform1f(P_fl.u.uPx,px);
   gl.uniform1f(P_fl.u.uGain,gain);gl.uniform1f(P_fl.u.uVary,vary);
   const d=s.d,now=F.time;let nn=0,nf=0;
@@ -1298,11 +1476,19 @@ function plant(i,now,initial){
   if(i<SPAWN_FL.n)setFlower(SPAWN_FL,i,x,0,z,ty,birth,sc,0,death,seed,yaw,br);else addFlower(SPAWN_FL,x,0,z,ty,birth,sc,0,death,seed,yaw,br);
 }
 for(let i=0;i<NGARD;i++)plant(i,0,true);
+let cfAcc=0;
 function updateGarden(dt){
-  gardAcc+=dt;if(gardAcc<.35)return;const now=F.time;gardAcc=0;
+  gardAcc+=dt;if(gardAcc<.35)return;const now=F.time,el=gardAcc;gardAcc=0;
   for(let i=0;i<NGARD;i++){const g=GARD[i];
     if(!g.emitted&&now>g.death-4.6){g.emitted=true;const n=4+Math.floor(R()*4);for(let k=0;k<n;k++)addMote(g.x+(R()-.5)*.3,(.4+.35*R())*g.sc,g.z+(R()-.5)*.3,now+.6+R()*3.6,32+R()*55);}
     else if(now>g.death+g.gap)plant(i,now,false);}
+  if(G.st>=7&&CFL.length){                                             // 回到连廊之后：连廊上的花也轮替——隔一会儿有一朵消散，过一阵原地再发一朵
+    cfAcc+=el;
+    for(const e of CFL)if(e.re&&now>e.re){e.re=0;setFlower(FLOW_FL,e.i,e.x,e.y,e.z,Math.floor(R()*4),now,e.sc,0);}
+    if(cfAcc>.9&&G.t>14){cfAcc=0;const e=CFL[Math.floor(R()*CFL.length)];
+      if(!e.re&&FLOW_FL.d[e.i*FL_STRIDE+5]<now-6){FLOW_FL.d[e.i*FL_STRIDE+6]=now+7;FLOW_FL.dirty=true;e.re=now+9+R()*18;
+        const n=3+Math.floor(R()*4);for(let k=0;k<n;k++)addMote(e.x+(R()-.5)*.3,e.y+(.4+.35*R())*e.sc,e.z+(R()-.5)*.3,now+2.6+R()*3.6,30+R()*50);}}
+  }
 }
 function drawGarden(VP,eye,px,hpx){
   drawFlowers(SPAWN_FL,VP,eye,px,.38,1);   // 整片压暗，花心不冲白；每朵再按自己的亮度分出明暗
@@ -1393,21 +1579,22 @@ canvas.addEventListener('touchmove',e=>{e.preventDefault();for(const t of e.chan
 const tEnd=e=>{for(const t of e.changedTouches){if(touch.move&&t.identifier===touch.move.id){touch.move=null;touch.mx=touch.mz=0;}if(touch.look&&t.identifier===touch.look.id)touch.look=null;}};
 canvas.addEventListener('touchend',tEnd);canvas.addEventListener('touchcancel',tEnd);
 
-const walkable=(x,z)=>floorSdf(x,z)<-.35;
+const walkable=(x,z)=>floorSdf(x,z)<-.35||stairWalk(x,z);
 function updatePlayer(dt){
   let f=0,s=0;
   if(keys.KeyW||keys.ArrowUp)f+=1;if(keys.KeyS||keys.ArrowDown)f-=1;if(keys.KeyD)s+=1;if(keys.KeyA)s-=1;
   if(keys.ArrowLeft)pl.yaw+=dt*1.7;if(keys.ArrowRight)pl.yaw-=dt*1.7;
   f-=touch.mz;s+=touch.mx;
   const l=Math.hypot(f,s);if(l>1){f/=l;s/=l;}
-  const sp=keys.ShiftLeft||keys.ShiftRight?7.2:3.4;
+  const run=keys.ShiftLeft||keys.ShiftRight,onSt=G.stair&&pl.z<STZ+.2,sp=onSt?(G.st>=5&&run?4.6:2.4):run?7.2:3.4;   // 阶梯上走得慢一些；回程可以跑
   const sy=Math.sin(pl.yaw),cy=Math.cos(pl.yaw);
   const tx=(-sy*f+cy*s)*sp,tz=(-cy*f-sy*s)*sp;
   const k=1-Math.exp(-dt*9);pl.vx+=(tx-pl.vx)*k;pl.vz+=(tz-pl.vz)*k;
   if(!entered){pl.vx=pl.vz=0;}
   const nx=pl.x+pl.vx*dt,nz=pl.z+pl.vz*dt;
   if(walkable(nx,nz)){pl.x=nx;pl.z=nz;}else if(walkable(nx,pl.z)){pl.x=nx;pl.vz*=.5;}else if(walkable(pl.x,nz)){pl.z=nz;pl.vx*=.5;}else{pl.vx=pl.vz=0;}
-  const gh=groundH(pl.x,pl.z);pl.y+=(gh-pl.y)*(1-Math.exp(-dt*12));
+  if(onSt&&pl.z<STZ-.25)pl.x-=pl.x*(1-Math.exp(-dt*1.5*Math.min(1,Math.hypot(pl.vx,pl.vz))));   // 阶梯上被轻轻带回中线：斜着走也不会一直顶在边上
+  const gh=G.stair&&pl.z<STZ?stepTop(Math.floor((STZ-pl.z)/STD)):groundH(pl.x,pl.z);pl.y+=(gh-pl.y)*(1-Math.exp(-dt*12));
   pl.bob+=Math.hypot(pl.vx,pl.vz)*dt*1.9;
 }
 
@@ -1429,7 +1616,7 @@ function updateEvents(dt,time){
     if(!ev.bFly){if(dH<25){ev.bFly=1;ev.bTimer=80+R()*60;}}                                      // 走近大厅：飞鸟起飞
     else{ev.bTimer-=dt;if(ev.bTimer<=0){if(dH>42&&R()<.45)ev.bFly=0;else ev.bTimer=40+R()*40;}} // 偶尔趁玩家不在回去歇一阵，更多时候在飞
     if(!ev.mobBorn&&pl.z<-38.2)ev.mobBorn=true;                                                  // 出生点到环的路走过六成：环开始从水下长出来
-    if(ev.palT<0&&pl.z<-84)ev.palT=0;                                                            // 走进后廊：形状1在环门上方的远空亮起
+    if(ev.palT<0&&!G.palGone&&pl.z<-84)ev.palT=0;                                                            // 走进后廊：形状1在环门上方的远空亮起
     // ③ 行动
     if(Math.hypot(pl.vx,pl.vz)<.15)ev.still+=dt;else ev.still=0;
     if(enterT>14&&Math.hypot(pl.vx,pl.vz)<.15)ev.idle+=dt;else ev.idle=0;
@@ -1447,21 +1634,468 @@ function updateEvents(dt,time){
   }
   // 倒悬宫殿：palT 是触发后的秒数，整段约 45 秒（时间线在 drawPal 里）
   if(ev.palT>=0)ev.palT+=dt;
+  if(entered)updateFlow(dt);
   updateGarden(dt);
   // ④ 水银山：山 → 尖顶建筑群与星体 → 巨人 → 山……每个形态都要沉寂很久，才花十几秒化成下一个
   {const m=ev.mm;if(m.wait>0){if(entered)m.wait-=dt;}else{m.k+=dt/17;if(m.k>=1){m.k=0;m.cur=(m.cur+1)%3;m.wait=42+R()*36;}}
    const w=ev.mmW;w[0]=w[1]=w[2]=0;w[m.cur]=1-sstep(.25,1,m.k);w[(m.cur+1)%3]=sstep(0,.75,m.k);w[3]=Math.sin(Math.PI*m.k);}
   if(ev.idle>10){if(!ev.ringOn&&ev.ring<=0){ev.ringOn=true;ev.ringC=[pl.x,pl.y,pl.z];}if(ev.ringOn)ev.ring=Math.min(1,ev.ring+dt/13);}else{ev.ringOn=false;ev.ring=Math.max(0,ev.ring-dt/8);}
-  // 水银：细河 ↔ 球；不时潜到水下，在那里发出暖光
+  // 水银：细河 ↔ 球；不时潜到水下，在那里转为金水母并发出暖光（水母接管后只保留这一只，回连廊浮出水面后再沿走廊漫游）
   ev.mercClock=(ev.mercClock+dt)%52;const c=ev.mercClock;
-  ev.mercG=c<32?0:c<37?sstep(32,37,c):c<46?1:1-sstep(46,52,c);
-  ev.mercS+=dt*3.1*(1-.9*ev.mercG);
-  {const p=mercPath(ev.mercS);ev.glow=[p[0],p[1],p[2],entered?sstep(.4,-1.2,p[1]):0];}
+  {const mp=mercPath(ev.mercS);
+   ev.mercG=G.jelly.init?0:(c<32?0:c<37?sstep(32,37,c):c<46?1:1-sstep(46,52,c))*sstep(-.2,1.,mp[1]);
+   if(!(G.st===7&&G.t<4.2))ev.mercS+=dt*3.1*(1-.9*ev.mercG);
+   if(G.jelly.init){const p=G.jelly.p;ev.glow=[p[0],p[1],p[2],G.st>=7?sstep(.6,-1.,p[1]):0];}
+   else{const p=mercPath(ev.mercS);ev.glow=[p[0],p[1],p[2],entered?sstep(.6,-1.,p[1]):0];}}
   // 远处的线：各自缓慢显隐
-  for(let i=0;i<3;i++)ev.pres[i]=sstep(-.35,.5,Math.sin(time*(.045+i*.011)+ev.presPhase[i]));
+  for(let i=0;i<3;i++)ev.pres[i]=sstep(-.35,.5,Math.sin(time*(.045+i*.011)+ev.presPhase[i]))*G.farV;
 }
 
 const NEAR=.1,FAR=1600;
+/* ───────────────────────── 游戏化流程 ─────────────────────────
+   倒悬宫殿长成之后的一条主线。G.st 是走到了哪一步：
+   0 等宫殿长成（并且玩家已经登上台阶）
+   1 环门（魔法阵）中央浮出那句话
+   2 环门消散，它后面出现一道向上的线条阶梯
+   3 阶梯开放。这一段是一道老老实实向上的阶梯，不做任何空间上的手脚，一切只取决于"走到了第几级"（G.maxS）：
+       · 渐黑：身后的连廊从出生点那头开始消散；黑暗从玩家身后最远处漫过来，面前最后才黑（P_dim 按视线方向压暗）。到第 S_DARK 级全黑；
+       · 宫殿：整体跟着玩家平移——无论走多少级，它在眼里都不变、也不变近；
+       · 第 S_WORD 级起：黑暗里一个词一个词地浮出话来（钉在前方的阶梯两侧，走过去就落在身后）；
+       · 第 S_FAR…S_END 级：宫殿才开始飘远、淡去。面前始终留着几级台阶。
+   4 孤岛：只剩脚下五级。没有任何参照物——这时才搬动玩家：
+       · 立刻把玩家连同这五级平移到"回程阶梯"的最底端（画面上没有任何变化）；
+       · 这五级原本是"向前升高"的，回程阶梯却要"向后升高"。每一级只在玩家看不见它的时候才翻过去（不在画面里的那一刻），脚下那一级不动。
+     孤岛出现后两秒内，那个形象（暂用方块占位）现身。
+   5 花从脚下开出来，沿来时的阶梯一路向上蔓延：每一级由两三朵花的茎沿着踏板的轮廓游走、相接而成，花与花之间还牵着一道道弧线。
+   6 连廊重新出现——玩家在"水面"之下，仰视着它。此时只有连廊和阶梯，没有水银山，也没有远处的线条宫殿。
+   7 回到高台：向下的阶梯消失，水面回来，远景慢慢回来。倒悬宫殿不再出现。 */
+const STD=.55,STR=.17,STW=1.,STSL=.37,STZ=-150.5,STY=2.4,S_DARK=20,S_DIS=13,S_FAR=30,PAL_DUR=9.5,S_END=66,NSTEP=130;
+const stepUp=new Float32Array(NSTEP+1),stepRet=new Float32Array(NSTEP+1),stepM=new Float32Array(NSTEP+1).fill(1),stepG=new Float32Array(NSTEP+1).fill(-1e4),stepFl=[],stepFull=new Uint8Array(NSTEP+1);
+for(let i=0;i<=NSTEP;i++){stepUp[i]=STY+STR*(i+1);stepRet[i]=STY-STR*(i+1);}
+const ISLAND_WORDS=['聚焦','危险','保持','观测'];
+const J_WT=[0.6,3.6,6.6,9.6];
+const G={st:0,t:0,ring:0,appear:0,maxS:-9,goneZ:1e4,dk:0,dim:0,far:0,farT:0,farV:1,palGain:1,palGone:false,palDis:false,palDisT:0,stair:false,ret:false,ie:0,front:1e9,fi:0,lo:-3,hi:-9,stA:1,water:1,sayA:0,
+  jBase:[0,0,0],stepHide:0,stepSolidHide:0,cfDone:false,formK:1,dkT:0,pv:0,lastPz:0,
+  jelly:{a:0,vis:0,jT:0,arrT:0,arrSd:1,m:0,sw:-1,p:[0,0,0],v:[0,0,0],d:[0,0,-1],s:1.05,init:false,ph:0,c:0,goal:[0,0,0],gT:0,yawS:0,mode:0,mT:0,lastW:-99,nW:0,spine:[],spineF:new Float32Array(NSPINE*3)},
+  word:ISLAND_WORDS.map(()=>({t:-100,p:[0,0,0],v:[0,0,0],a:0}))};
+const stepTop=i=>{i=Math.max(0,Math.min(NSTEP,i));return G.ret?stepRet[i]+2*STR*(i-G.ie)*(1-stepM[i]):stepUp[i];};
+function stairWalk(x,z){if(!G.stair||z>STZ+1.2)return false;const s=(STZ-z)/STD;return Math.abs(x)<STW-.12&&s>=G.lo&&s<=G.hi+.82;}
+const sayEl=(()=>{const mk=(t,cls='say')=>{const e=document.createElement('div');e.className=cls;e.textContent=t;document.body.appendChild(e);return e;};
+  return{ring:mk('祂会降临么？还是...你选择登上去？'),isl:ISLAND_WORDS.map(t=>mk(t,'say warm'))};})();
+const vnoiseJS=(()=>{const h=(i,j)=>{let n=Math.sin(i*127.1+j*311.7)*43758.5453;return n-Math.floor(n);};
+  return(x,y)=>{const i=Math.floor(x),j=Math.floor(y);let fx=x-i,fy=y-j;fx=fx*fx*(3-2*fx);fy=fy*fy*(3-2*fy);return(h(i,j)*(1-fx)+h(i+1,j)*fx)*(1-fy)+(h(i,j+1)*(1-fx)+h(i+1,j+1)*fx)*fy;};})();
+/* 回到连廊时，连廊上的花。不是随手撒的：
+   · 沿两侧的柱列各一条花带，贴着柱脚最密，往路心渐疏——路心留一条空着的纵深；
+   · 每根柱子脚下围着一小丛；
+   · 圆厅里绕着水池一圈；高台上环门原来的位置两侧各一丛。
+   离高台近的先开，一路向出生点开过去。 */
+const COLS_ALL=(()=>{const c=[[-7.6,12.5,.62],[7.6,12.5,.62],[-8.8,4.6,.62],[8.8,4.6,.62],[-11,-146,.95],[11,-146,.95]];
+  for(let i=0;i<=6;i++)for(const s of[-1,1])c.push([s*6.5,-4-8*i,.62]);for(let i=0;i<=4;i++)for(const s of[-1,1])c.push([s*6.5,-88-8*i,.62]);
+  for(let i=0;i<12;i++){const a=(i+.5)/12*TAU;c.push([Math.cos(a)*14.5,-70+Math.sin(a)*14.5,.74]);}return c;})();
+const inColBase=(x,z,m=.12)=>COLS_ALL.some(c=>Math.max(Math.abs(x-c[0]),Math.abs(z-c[1]))<c[2]*1.4+m);
+const CFL=[],PFL=[];
+function spawnPlatformFlowers(){                                                              // 高台密集花丛：先休眠（birth=1e9），等平台凝成实体的光晕刚到前缘即提前萌发，与实体化紧密衔接
+  const putP=(x,z,sc,y=2.4)=>{if(inColBase(x,z))return;
+    const i=addFlower(FLOW_FL,x,y,z,Math.floor(R()*4),1e9,sc,3,1e9,null,R()*TAU,1.15+R()*.55);
+    if(i>=0){CFL.push({i,x,y,z,sc,re:0});PFL.push({i,x,z,no:(vnoiseJS(x*.22,z*.22)-.5)*.28,born:false});}};
+  // 两侧与后沿的茂密花带
+  for(let k=0;k<280;k++){const sg=R()<.5?-1:1,x=sg*(3.0+4.75*Math.pow(R(),.78)),z=-149.6+R()*15.2;putP(x,z,.6+R()*.78);}
+  // 高台中央大面积非常密集的花海（铺满白石台面，保留疏密起伏与高低错落）
+  for(let k=0;k<520;k++){const x=(R()*2-1)*6.8,z=-149.5+R()*15.1;
+    if(Math.abs(x)<.85&&z<-148.6)continue;
+    putP(x,z,.52+R()*.76);}
+  // 紧贴高台前沿（眺望连廊处）的一簇密花
+  for(let k=0;k<110;k++){const x=(R()*2-1)*7.6,z=-136.8+R()*2.4;putP(x,z,.58+R()*.72);}
+  // 高台通向连廊的 12 级石阶：全宽自然蔓延（不只在两侧，中央台阶也顺着高台花海错落垂落）
+  const stairTopY=z=>z<=-134?2.4:z>=-126?0:(Math.min(11,Math.floor((-126-z)/(8/12)))+1)*.2;
+  for(let k=0;k<85;k++){const sg=R()<.5?-1:1,x=sg*(4.0+3.7*R()),z=-134.0+R()*7.9;putP(x,z,.55+R()*.64,stairTopY(z));}
+  for(let k=0;k<165;k++){
+    const u=Math.pow(R(),1.18),z=-134.0+u*7.85;                                              // 越靠近高台上沿越密，顺阶梯往下自然疏朗成丛
+    const x=(R()*2-1)*5.4;
+    if(vnoiseJS(x*.42+3.1,z*.48+7.4)<.22+u*.24)continue;                                     // 留出自然疏密起伏，避免机械铺满
+    putP(x,z,.48+R()*.68,stairTopY(z));
+  }
+}
+function wakePlatformFlowers(all=false){
+  if(!PFL.length)return;
+  const now=F.time;let dirty=false;
+  for(const f of PFL){
+    if(f.born)continue;
+    const t=sstep(45,10,Math.hypot(f.x-pl.x,f.z-pl.z))*G.formK*1.25+f.no;
+    if(all||t>=.24){                                                                          // 在实体化光晕（formT≈0.5）到达前略提前萌发，茎叶与花蕾正好随光晕一起绽开
+      f.born=true;FLOW_FL.d[f.i*FL_STRIDE+5]=now-.15+R()*.3;dirty=true;
+    }
+  }
+  if(dirty)FLOW_FL.dirty=true;
+}
+function spawnCorridorFlowers(){
+  let n=0;const now=F.time,put=(x,z,sc)=>{if(n>=1750||inColBase(x,z))return;if(z<-125.5)return;
+    const i=addFlower(FLOW_FL,x,0,z,Math.floor(R()*4),now+Math.hypot(x,z+150)*.075+R()*6,sc,1);if(i>=0){CFL.push({i,x,y:0,z,sc,re:0});n++;}};
+  for(let z=-124;z<1;z+=.3){if(z<-55&&z>-85)continue;                               // 前廊、后廊：两条花带，压在柱列上
+    for(const sg of[-1,1]){const dn=.3+.7*vnoiseJS(z*.21+sg*7,3.1);
+      if(R()<dn)put(sg*(6.3+(R()+R()+R()-1.5)*1.7),z+R()*.3,.75+R()*.7);
+      if(R()<dn*.8)put(sg*(4.5+1.3*R()*R()),z+R()*.3,.6+R()*.6);}                   // 贴着路沿的一溜，走在廊里就在脚边
+    const cn=vnoiseJS(z*.17+40,1.7);if(R()<.1+.65*cn*cn*cn)put((R()+R()-1)*4.1,z+R()*.3,.5+R()*.55);}   // 廊道中间：疏疏落落的几丛，有的地方空着
+  for(const c of COLS_ALL){const m=5+Math.floor(R()*5);for(let k=0;k<m;k++){const a=R()*TAU,r=c[2]*1.5+.2+R()*R()*1.2;put(c[0]+Math.cos(a)*r,c[1]+Math.sin(a)*r,.6+R()*.75);}}   // 柱脚
+  for(let k=0;k<150;k++){const a=R()*TAU,r=5.3+2.6*R()*R();if(vnoiseJS(Math.cos(a)*3+9,Math.sin(a)*3)<.32)continue;put(Math.cos(a)*r,-70+Math.sin(a)*r,.6+R()*.6);}          // 绕着水池
+  spawnPlatformFlowers();
+}
+/* 水母的游法：只能沿自己的身体轴向前推，靠伞盖一缩一张地一下一下推；身体轴是慢慢偏过去的（有转向速度上限），
+   速度靠水的阻力慢慢衰减。所以它永远在画弧线、有惯性，不会直线冲向某个点，也不会原地急转。
+   goal 只是"大致想去的方向"，路上还叠着一层缓慢变化的偏航。 */
+const jEye=()=>[pl.x,pl.y+1.68,pl.z];
+function packJellySpine(){const j=G.jelly;for(let i=0;i<NSPINE;i++){j.spineF[i*3]=j.spine[i][0];j.spineF[i*3+1]=j.spine[i][1];j.spineF[i*3+2]=j.spine[i][2];}}
+function initJelly(p,d){const j=G.jelly,L=2.4*j.s/(NSPINE-1);j.init=true;j.p=p.slice();j.d=d.slice();j.v=[d[0]*.8,d[1]*.8,d[2]*.8];j.ph=0;j.c=0;j.spine=[];
+  for(let i=0;i<NSPINE;i++){const o=.22*j.s+i*L;j.spine.push([p[0]-d[0]*o,p[1]-d[1]*o-i*.01,p[2]-d[2]*o]);}packJellySpine();}
+function shiftJelly(dy,dz=0){const j=G.jelly;j.p[1]+=dy;j.p[2]+=dz;for(const s of j.spine){s[1]+=dy;s[2]+=dz;}packJellySpine();}
+function swimJelly(dt,goal,o={}){
+  const j=G.jelly,p=j.p,d=j.d,v=j.v,eye=jEye(),t=F.time,rep=1-.8*j.m;
+  let gx=goal[0]-p[0],gy=goal[1]-p[1],gz=goal[2]-p[2];const dist=Math.hypot(gx,gy,gz)||1e-3;gx/=dist;gy/=dist;gz/=dist;
+  const wn=1-.6*j.m;
+  gx+=(.30*Math.sin(t*.31+1.7)+.16*Math.sin(t*.77))*wn;gy+=(.18*Math.sin(t*.43+.4))*wn;gz+=(.30*Math.cos(t*.27+2.3)+.16*Math.cos(t*.69))*wn;
+  const ex=p[0]-eye[0],ey=p[1]-eye[1],ez=p[2]-eye[2],ed=Math.hypot(ex,ey,ez)||1e-3;
+  if(rep>.05&&ed<4.2){const k=(4.2-ed)*1.3*rep/ed;gx+=ex*k;gy+=ey*k*.6;gz+=ez*k;}            // 不贴着玩家的脸游过去
+  const lx=p[0]+d[0]*2.2-eye[0],ly=p[1]+d[1]*2.2-eye[1],lz=p[2]+d[2]*2.2-eye[2],ld=Math.hypot(lx,ly,lz)||1e-3;
+  if(rep>.05&&ld<4.2){const k=(4.2-ld)*1.4*rep/ld;gx+=lx*k;gy+=ly*k*.6;gz+=lz*k;}            // 前方要撞上玩家时提前绕开
+  const gl=Math.hypot(gx,gy,gz)||1;gx/=gl;gy/=gl;gz/=gl;
+  const dot=Math.max(-1,Math.min(1,d[0]*gx+d[1]*gy+d[2]*gz)),ang=Math.acos(dot);
+  if(ang>1e-4){                                                                              // 绕 d×g 转过最多 turn·dt 弧度
+    const a=Math.min(ang,(o.turn||.7)*dt);let ax=d[1]*gz-d[2]*gy,ay=d[2]*gx-d[0]*gz,az=d[0]*gy-d[1]*gx,al=Math.hypot(ax,ay,az);
+    if(al<1e-5){ax=0;ay=1;az=0;al=1;}ax/=al;ay/=al;az/=al;
+    const c=Math.cos(a),s=Math.sin(a),kd=(ax*d[0]+ay*d[1]+az*d[2])*(1-c);
+    const nx=d[0]*c+(ay*d[2]-az*d[1])*s+ax*kd,ny=d[1]*c+(az*d[0]-ax*d[2])*s+ay*kd,nz=d[2]*c+(ax*d[1]-ay*d[0])*s+az*kd,nl=Math.hypot(nx,ny,nz);
+    d[0]=nx/nl;d[1]=ny/nl;d[2]=nz/nl;}
+  const urg=Math.max(o.minU||.35,Math.min(o.maxU||4.5,dist/(o.div||3)));                     // 离得远就推得更勤、更用力；陪玩家走时至少跟得上脚步
+  j.ph+=dt*(.42+.16*Math.min(urg,3))*TAU;const sn=Math.sin(j.ph),cc=sn>0?sn*sn:0;j.c+=(cc-j.c)*(1-Math.exp(-dt*10));
+  const pr=cc*(1-j.m)+.62*j.m;                                                               // 变回水银后不再一顿一顿地搏动，改作顺滑流淌
+  const th=pr*3.4*urg*Math.min(1,dist/1.6)*(.35+.65*Math.max(0,dot));                        // 身体还没转过来时推得轻
+  const dr=Math.exp(-dt*1.5);
+  if(rep>.05&&ed<3.4){const k=(3.4-ed)*1.1*rep*dt/ed;v[0]+=ex*k;v[1]+=ey*k*.5;v[2]+=ez*k;}   // 离得太近时被水轻轻推开，像是怕生
+  v[0]=(v[0]+d[0]*th*dt)*dr;v[1]=(v[1]+d[1]*th*dt-.05*(1-cc)*(1-j.m)*dt)*dr;v[2]=(v[2]+d[2]*th*dt)*dr;
+  p[0]+=v[0]*dt;p[1]+=v[1]*dt;p[2]+=v[2]*dt;
+  // 触须的链：根部钉在伞缘，其余每节只跟着上一节（follow-the-leader），变回水银后拉长成一条长细河，顺着刚飞过的弧线拖在后面
+  const S=j.spine,L=(2.4+13.5*j.m)*j.s/(NSPINE-1),r0=.22*j.s,sink=.18*(1-j.m),pull=.5*(1-.88*j.m);
+  S[0][0]=p[0]-d[0]*r0;S[0][1]=p[1]-d[1]*r0;S[0][2]=p[2]-d[2]*r0;
+  for(let i=1;i<NSPINE;i++){const a=S[i-1],b=S[i];
+    b[0]-=d[0]*pull*dt;b[1]-=(d[1]*pull+sink)*dt;b[2]-=d[2]*pull*dt;
+    const dx=b[0]-a[0],dy=b[1]-a[1],dz=b[2]-a[2],k=L/(Math.hypot(dx,dy,dz)||1e-4);b[0]=a[0]+dx*k;b[1]=a[1]+dy*k;b[2]=a[2]+dz*k;}
+  packJellySpine();
+}
+/* 玩家视野前方的某一点：f 米远、偏右 r 米、比眼睛高 u 米。视线方向是慢慢跟过去的，玩家扫一眼别处它不会跟着甩 */
+function jStage(dt,f,r,u){const j=G.jelly,k=1-Math.exp(-dt*.35);let dy=pl.yaw-j.yawS;dy=Math.atan2(Math.sin(dy),Math.cos(dy));j.yawS+=dy*k;
+  j.pitS=(j.pitS||0)+(pl.pitch-(j.pitS||0))*k;
+  const fx=-Math.sin(j.yawS),fz=-Math.cos(j.yawS);return[pl.x+fx*f-fz*r,pl.y+1.68+u+Math.tan(Math.max(-.6,Math.min(.6,j.pitS)))*f*.85,pl.z+fz*f+fx*r];}
+function jWander(dt,maxU){const j=G.jelly;if(!j.goalO)j.goalO=[6.5,0,.2];const gp=jStage(dt,j.goalO[0],j.goalO[1],j.goalO[2]);
+  j.gT-=dt;if(j.gT<=0||Math.hypot(gp[0]-j.p[0],gp[1]-j.p[1],gp[2]-j.p[2])<1.3){j.gT=3.5+R()*3;j.goalO=[5.4+R()*3.2,(R()*2-1)*3.2,-.5+R()*1.1];}
+  swimJelly(dt,gp,{turn:.6,maxU});}
+const STAIR_TYPES=[2,2,0,3,2,0,2,3];
+function addStepFlower(i,x,z,sc,delay,style){
+  const sd=R(),ty=STAIR_TYPES[Math.floor(R()*STAIR_TYPES.length)],br=.82+R()*.62,yaw=R()*TAU;
+  const fh=(.07+.16*R())*sc,born=F.time+delay;
+  addFlower(FLOW_FL,x,stepRet[i],z,ty,born,sc,2,1e9,sd,yaw,br,1,fh);
+  if(!stepFl[i])stepFl[i]=[];
+  stepFl[i].push([x,z,fh,sc,born,style]);
+}
+function spawnStepBase(i){
+  const zc=STZ-(i+.5)*STD;stepG[i]=F.time;stepFl[i]=[];stepFull[i]=0;
+  // 初始仅稀疏长出 2~3 朵边界引导花，玩家走近后再盛放更多花
+  const n=2+(R()<.45?1:0);
+  for(let k=0;k<n;k++){
+    const sg=k===0?-1:k===1?1:(R()<.5?-1:1);
+    const x=sg*STW*(.78+.26*R()),z=zc+(R()-.5)*STSL*.78,sc=.55+R()*.28;
+    addStepFlower(i,x,z,sc,R()*.35,0);
+  }
+}
+function bloomStepNear(i){
+  if(stepFull[i]||stepG[i]<-1e3)return;
+  stepFull[i]=1;
+  const zc=STZ-(i+.5)*STD,extra=7+Math.floor(R()*3);                                        // 走近时再盛放 7~9 朵，使单级共约 10 朵
+  for(let k=0;k<extra;k++){
+    let x,sc,style=0;
+    if(k<3){x=-STW*(.42+.68*R());sc=k===0?.92+R()*.26:.48+R()*.36;}
+    else if(k<6){x=STW*(.42+.68*R());sc=k===3?.92+R()*.26:.48+R()*.36;}
+    else{x=(R()*2-1)*STW*.46;sc=.46+R()*.38;style=R()<.55?1:0;}
+    const z=zc+(R()-.5)*STSL*.90;
+    addStepFlower(i,x,z,sc,.08*k+R()*.28,style);
+  }
+}
+/* 陪玩家走回连廊：总在玩家前方（+z，连廊方向）五六米、偏一侧，玩家走多快它就推得多勤 */
+function jAccompany(dt,o={}){const j=G.jelly,t=F.time,sd=j.side||1,ah=o.ahead||5.5,behind=Math.max(0,pl.z+ah-j.p[2]);   // 落在后面时推得更急，追上来
+  swimJelly(dt,[pl.x+sd*(o.side||1.3)+.5*Math.sin(t*.37),pl.y+(o.up||2.2)+.3*Math.sin(t*.5),pl.z+ah],{turn:o.turn||.8,maxU:9,minU:Math.min(9,Math.max(0,G.pv)*1.9+behind*.5)});}
+/* 回程走过大约一半，连廊先从黑暗里渐显成线稿（至少 5 秒）；再随玩家走近，由近及远凝成实体 */
+function corridorReveal(dt,sp){
+  G.rv=Math.min(sstep(G.ie*.6,G.ie*.3,sp),(G.rv||0)+dt/5);const rv=G.rv;
+  G.dim=1-rv;G.goneZ=rv>=1?1e4:-170+rv*232;
+  G.formK=Math.max(G.formK,Math.min(rv,sstep(G.ie*.36,-2.4,sp),G.formK+dt/6));
+  if(!G.cfDone&&rv>.02){G.cfDone=true;spawnCorridorFlowers();}
+  if(G.cfDone&&G.formK>.01)wakePlatformFlowers();}
+function killStairFlowers(){const d=FLOW_FL.d,now=F.time;
+  for(let i=0;i<FLOW_FL.n;i++){const b=i*FL_STRIDE;if(d[b+10]>.5)d[b+6]=Math.min(d[b+6],now+6.6+R()*1.6);}FLOW_FL.dirty=true;}
+/* 皇宫模糊消散与水母准点入画：
+   玩家走到倒数 15 级台阶（S_DIS=15）时触发，总长 9.2s，
+   之后无论是否继续走完最后 15 级，皇宫都会按同一条"前期略慢、后期略快"曲线晕散；
+   消失前 ~3 秒水母从容进入直视皇宫时的屏幕边缘，消失前 ~1 秒游至玩家与皇宫之间。 */
+function flipToReturn(i0){
+  if(G.ret)return;
+  const dy=stepRet[i0]-stepUp[i0];
+  pl.y+=dy;G.jBase[1]+=dy;
+  if(G.jelly.init)shiftJelly(dy,0);
+  for(const w of G.word)if(w.t>-50)w.p[1]+=dy;                                               // 同步平移已浮现的字，避免切换高度后字被留在上方视野外
+  G.ret=true;for(let i=i0-2;i<=i0+2;i++)stepM[i]=i===i0?1:0;
+}
+function stepPalDis(dt){
+  if(!G.palDis)return;
+  G.palDisT+=dt;
+  const u=Math.min(1,G.palDisT/PAL_DUR);
+  G.far=u*(.65+.35*u);G.palGain=1-sstep(.90,1,G.far);                                         // 无死区：一触发即肉眼可见地开始晕散，且后期速率超过前期两倍
+  if(G.far>=1&&!G.palGone){G.palGone=true;ev.palT=-1;if(G.st===4&&!G.ret)flipToReturn(G.ie);}   // 皇宫完全散尽、四周纯黑的瞬间再无感切到回程高度，皇宫绝不跳动
+  const rem=PAL_DUR-G.palDisT,j=G.jelly;
+  if(rem<=5.4){                                                                              // 消失前约 5.4 秒在远侧视野外从容启程，入画前已自然显形
+    if(!j.init){
+      const sd=R()<.5?-1:1;j.arrSd=sd;j.arrT=0;
+      initJelly([pl.x+sd*11.4,pl.y+2.5,pl.z-4.0],[-sd*.90,.02,-.44]);
+      j.v=[-sd*1.7,.1,-0.8];j.yawS=0;j.a=0;j.goalO=[6.2,sd*1.2,.2];j.gT=4;
+    }
+    j.a=Math.min(1,j.a+dt/1.5);
+    if(rem>.4){                                                                              // 消失前 ~3 秒抵达直视屏幕边缘，消失前 ~1 秒游至玩家与皇宫之间
+      const fwd=Math.max(0,-G.pv);
+      const tgt=[pl.x+j.arrSd*.12,pl.y+2.25+fwd*.4,pl.z-6.8-fwd*1.2];
+      swimJelly(dt,tgt,{turn:1.15,maxU:5.8+fwd*1.15,minU:4.0+fwd*1.05,div:1.9});
+    }
+  }
+}
+function updateFlow(dt){
+  const sp=(STZ-pl.z)/STD;
+  if(dt>0){G.pv+=(Math.max(-8,Math.min(8,(pl.z-G.lastPz)/dt))-G.pv)*(1-Math.exp(-dt*3));}G.lastPz=pl.z;
+  switch(G.st){
+  case 0:if(ev.palT>34&&pl.z<-127){G.st=1;G.t=0;}break;                                      // 宫殿长成（约第 33 秒）、且玩家已登上台阶：话立刻浮出来
+  case 1:G.t+=dt;G.sayA=sstep(0,1.3,G.t)*(1-sstep(7.5,9.5,G.t));if(G.t>9.5){G.st=2;G.t=0;G.sayA=0;}break;
+  case 2:G.t+=dt;G.ring=sstep(0,3.5,G.t);G.appear=sstep(2.2,7,G.t)*7;G.hi=Math.floor(G.appear)-1;if(G.t>2.6)G.stair=true;if(G.t>7){G.st=3;G.hi=NSTEP;}break;
+  case 3:{
+    G.maxS=Math.max(G.maxS,sp);const ps=G.maxS>=14?G.maxS:Math.max(-1,sp),hide=sstep(.6,14,ps);   // 第 14 级之前退回去，世界会跟着回来；过了就回不去了
+    G.goneZ=hide<=0?1e4:40-205*hide;G.dk=sstep(1,S_DARK,ps);
+    G.lo=hide>=1?.2:-3;                                                                      // 连廊没了之后，退不回去
+    // 走到倒数约 10 级台阶（S_DIS）时触发皇宫开始模糊消散，之后无论是否走完最后 10 级都不影响皇宫继续消散
+    if(G.maxS>=S_DIS)G.palDis=true;
+    stepPalDis(dt);
+    // 走完最后 10 级（S_FAR），或玩家停在半路但皇宫已快消散完毕：无缝转入孤岛阶段，不重置皇宫消散进度、不瞬移位置
+    if(G.maxS>=S_FAR||(G.palDis&&G.palDisT>=PAL_DUR-1.5)){
+      const i0=Math.max(2,Math.min(NSTEP-4,Math.floor(sp)));
+      G.st=4;G.t=0;G.ie=i0;G.water=0;G.farV=0;G.dk=1;G.palDis=true;G.lastPz=pl.z;
+      G.lo=G.ie-2+.12;G.hi=G.ie+2;
+      G.jBase=[0,pl.y,pl.z];G.jelly.mode=0;G.jelly.mT=0;G.jelly.nW=0;G.jelly.lastW=-99;
+      for(const w of G.word){w.t=-100;w.a=0;}
+      if(G.palGone)flipToReturn(G.ie);}
+    break;}
+  case 4:{
+    G.t+=dt;
+    stepPalDis(dt);
+    // 脚下楼梯比皇宫消散得略慢（皇宫 9.2 秒散尽；实心 4.0–11.5 秒柔化、线框 6.5–15.5 秒慢慢隐去）
+    G.stepSolidHide=sstep(4.0,11.5,G.palDisT);G.stepHide=sstep(6.5,15.5,G.palDisT);
+    const j=G.jelly,rem=PAL_DUR-G.palDisT;
+    if(rem<=.4)j.arrT+=dt;                                                                   // 水母就位、皇宫散尽后紧接开始计字序
+    if(rem<=.4&&j.init){
+      if(j.mode===0){
+        jWander(dt,2.2);
+        if(G.palGone&&j.nW<4&&j.arrT>=J_WT[j.nW]&&j.arrT-j.lastW>2.6&&(j.arrT>J_WT[j.nW]+22||flowVP&&seen(j.p[0],j.p[1],j.p[2]))){
+          const eye=jEye();let fx=j.p[0]-eye[0],fz=j.p[2]-eye[2];const fl=Math.hypot(fx,fz)||1;fx/=fl;fz/=fl;
+          let sx=-fz,sz=fx;if(sx*j.v[0]+sz*j.v[2]>0){sx=-sx;sz=-sz;}                        // 横向偏到它游来的那一侧，字留在身后的水里，不压在触须上
+          const w=G.word[j.nW++];w.t=0;j.lastW=j.arrT;
+          w.p=[j.p[0]+fx*1.2+sx*1.05,j.p[1]+.3,j.p[2]+fz*1.2+sz*1.05];
+          w.v=[j.v[0]*.3+fx*.07,.03,j.v[2]*.3+fz*.07];
+        }
+        if(j.nW>=4&&j.arrT-j.lastW>2.0){j.mode=2;j.mT=0;j.side=j.p[0]>=pl.x?1:-1;}          // 四字出完，很快就往玩家身后游去
+      }else{
+        // 从玩家一侧绕过去，游到身后的连廊方向（+z）六七米处，在那里悠悠地等玩家回头
+        j.mT+=dt;const past=j.p[2]>pl.z+.5;
+        swimJelly(dt,past?[pl.x+j.side*1.5+.5*Math.sin(F.time*.4),pl.y+2.3,pl.z+6.5]:[pl.x+j.side*3.2,pl.y+2.,pl.z+1.],{turn:.95,maxU:5,minU:past?0:3.4});
+      }
+    }
+    if(j.mode===2&&(j.p[2]>pl.z+1||j.mT>8)&&j.mT>1.5&&Math.cos(pl.yaw)<-.35){             // 水母游到身后，玩家转头跟上它时，花阶梯开始构成
+      G.st=5;G.t=0;G.front=G.ie+2.99;G.fi=G.ie+2;G.palGone=true;ev.palT=-1;G.formK=0;G.dk=0;G.dim=1;G.rv=0;
+    }
+    break;}
+  case 5:G.t+=dt;G.front-=dt*Math.min(8.5,3.2+G.t*.9);                                       // 花阶梯向前延展
+    jAccompany(dt);corridorReveal(dt,sp);
+    while(G.fi>=0&&G.fi>=G.front-1)spawnStepBase(G.fi--);
+    for(let i=Math.max(0,Math.floor(sp)-7);i<=Math.min(G.ie+2,Math.ceil(sp)+7);i++)bloomStepNear(i);   // 玩家接近该阶梯时长出更多花
+    for(let i=G.ie-2;i<=G.ie+2;i++)stepM[i]=Math.min(1,stepM[i]+dt/1.5);
+    G.lo=Math.max(-3,Math.max(0,G.front)+.12);
+    if(G.front<=-1.5){G.st=6;G.t=0;G.lo=-3;}break;
+  case 6:{G.t+=dt;G.ring=1;G.dk=0;
+    jAccompany(dt);corridorReveal(dt,sp);
+    for(let i=Math.max(0,Math.floor(sp)-7);i<=Math.min(G.ie+2,Math.ceil(sp)+7);i++)bloomStepNear(i);   // 行走过程中接近每级阶梯时盛放更多花
+    if(pl.z>STZ+1.3){G.st=7;G.t=0;G.hi=-9;ev.mercS=235;ev.mercClock=0;ev.mercG=0;if(!G.cfDone){G.cfDone=true;spawnCorridorFlowers();}killStairFlowers();}break;}
+  case 7:{G.t+=dt;
+    if(G.rv!==undefined&&G.rv<1){G.rv=Math.min(1,G.rv+dt/1.2);G.dim=1-G.rv;G.goneZ=G.rv>=1?1e4:-170+G.rv*232;}   // 跑得快也不会突然整片跳出来
+    else{G.goneZ=1e4;G.dim=0;}
+    G.formK=Math.min(1,G.formK+dt/3);wakePlatformFlowers(G.formK>=.99);
+    G.stA=1-sstep(.5,6.5,G.t);G.water=sstep(.5,6,G.t);G.farV=sstep(5,16,G.t);if(G.t>6.6)G.stair=false;if(G.t>16)G.st=8;   // 阶梯与上面的花一起化掉
+    // 回到连廊：水母往上一浮，"水面"从伞顶一路扫到触须末梢，扫过的地方变回水银；随后拉长成细河，重新回到连廊里四处漫游；潜回水下时重新化作金水母
+    const j=G.jelly;j.a=1;j.sw=G.t<.8?-1:Math.min(1.05,(G.t-.8)/3.0);
+    if(G.t<5.6)j.m=sstep(2.2,5.6,G.t);else j.m+=(sstep(-.2,1.2,j.p[1])-j.m)*(1-Math.exp(-dt*3.5));
+    if(G.t<4.2)jAccompany(dt,{up:2.2+.4*sstep(0,3,G.t),ahead:7.2,side:1.2,turn:.8});
+    else swimJelly(dt,mercPath(ev.mercS),{turn:1.5,maxU:6.5,minU:1.8,div:1.8});
+    break;}
+  case 8:{const j=G.jelly;j.m+=(sstep(-.2,1.2,j.p[1])-j.m)*(1-Math.exp(-dt*3.5));             // 只要潜到水面以下，就转回金水母形态；浮出水面恢复水银细河
+    swimJelly(dt,mercPath(ev.mercS),{turn:1.5,maxU:6.5,minU:1.8,div:1.8});break;}
+  }
+  for(const w of G.word){if(w.t>-50&&w.t<60){w.t+=dt;const k=Math.exp(-dt*.5);w.p[0]+=w.v[0]*dt;w.p[1]+=w.v[1]*dt;w.p[2]+=w.v[2]*dt;w.v[0]*=k;w.v[2]*=k;}
+    const stay=w.t<0?0:sstep(0,2.2,w.t)*(1-.52*sstep(3.8,7.0,w.t))*(1-sstep(9.0,13.5,w.t));
+    w.a=stay*(G.st>=5?Math.max(0,1-G.t/1.8):1);}
+}
+/* 阶梯与半透明踏板表面：每帧按玩家的位置重建。 */
+const BE=[[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]],BF=[[0,2,3,1,0,0,-1],[4,5,7,6,0,0,1],[0,4,6,2,-1,0,0],[1,3,7,5,1,0,0],[2,6,7,3,0,1,0],[0,1,5,4,0,-1,0]];
+function dLine(a,b,r,g,bl,w=1){if(dlN>=DLMAX)return;const o=dlN++*10;DL[o]=a[0];DL[o+1]=a[1];DL[o+2]=a[2];DL[o+3]=b[0];DL[o+4]=b[1];DL[o+5]=b[2];DL[o+6]=r;DL[o+7]=g;DL[o+8]=bl;DL[o+9]=w;}
+function dSurf(zc,y,a){if(dtN+6>DTMAX||a<=.004)return;const hz=STSL*.5;
+  const P=[[-STW,y,zc+hz,0,0],[STW,y,zc+hz,1,0],[STW,y,zc-hz,1,1],[-STW,y,zc-hz,0,1]];
+  for(const idx of[0,1,2,0,2,3]){const p=P[idx],o=dtN++*6;DT[o]=p[0];DT[o+1]=p[1];DT[o+2]=p[2];DT[o+3]=p[3];DT[o+4]=p[4];DT[o+5]=a;}}
+function dBox(c,h,ry,rx,la,k,lw=1){                       // 中心、半边长、绕 y / x 的转角；la 线的亮度，k 凝实的程度
+  const cy=Math.cos(ry),sy=Math.sin(ry),cx=Math.cos(rx),sx=Math.sin(rx),rot=(x,y,z)=>{const y2=y*cx-z*sx,z2=y*sx+z*cx;return[x*cy+z2*sy,y2,z2*cy-x*sy];};
+  const P=[];for(let i=0;i<8;i++){const r=rot(i&1?h[0]:-h[0],i&2?h[1]:-h[1],i&4?h[2]:-h[2]);P.push([c[0]+r[0],c[1]+r[1],c[2]+r[2]]);}
+  if(la>.004)for(const[a,b]of BE)dLine(P[a],P[b],.55*la,.68*la,la,lw);
+  if(k>.02&&dsN+36<=DSMAX)for(const f of BF){const n=rot(f[4],f[5],f[6]);for(const i of[0,1,2,0,2,3]){const p=P[f[i]],o=dsN++*7;DS[o]=p[0];DS[o+1]=p[1];DS[o+2]=p[2];DS[o+3]=n[0];DS[o+4]=n[1];DS[o+5]=n[2];DS[o+6]=k;}}
+}
+/* 由花与分裂花茎连成的一级花阶梯（永不凝成实心石块）：
+   · 仅下层板呈柔和半透明雾面，上层为一圈精致柔美的圆角蓝银发光线；
+   · 每朵花从精准的花萼正下方分裂出极纤细、带渐变的弧茎，竖直垂下再水平切向汇入台阶上层边框。 */
+const CR=.09,RSEG=44;
+function rrect(t,zc,o){                                   // 圆角矩形周长采样 t∈[0,1)
+  const hz=STSL*.5,wx=STW-CR,wz=hz-CR,L1=2*wx,L2=2*wz,LA=Math.PI*.5*CR,P=2*(L1+L2)+4*LA;
+  let d=(((t%1)+1)%1)*P;
+  if(d<L1){o[0]=-wx+d;o[1]=zc+hz;return;}d-=L1;
+  if(d<LA){const a=-Math.PI*.5+d/CR;o[0]=wx+Math.cos(a)*CR;o[1]=zc+wz-Math.sin(a)*CR;return;}d-=LA;
+  if(d<L2){o[0]=STW;o[1]=zc+wz-d;return;}d-=L2;
+  if(d<LA){const a=d/CR;o[0]=wx+Math.cos(a)*CR;o[1]=zc-wz-Math.sin(a)*CR;return;}d-=LA;
+  if(d<L1){o[0]=wx-d;o[1]=zc-hz;return;}d-=L1;
+  if(d<LA){const a=Math.PI*.5+d/CR;o[0]=-wx+Math.cos(a)*CR;o[1]=zc-wz-Math.sin(a)*CR;return;}d-=LA;
+  if(d<L2){o[0]=-STW;o[1]=zc-wz+d;return;}d-=L2;
+  const a=Math.PI+d/CR;o[0]=-wx+Math.cos(a)*CR;o[1]=zc+wz-Math.sin(a)*CR;
+}
+const _a=[0,0,0],_b=[0,0,0],_o=[0,0],_q0=[0,0,0],_r0=[0,0,0];
+function dGrown(i,a,k,sp){
+  const top=stepRet[i],zc=STZ-(i+.5)*STD,age=F.time-stepG[i]-.2,fl=stepFl[i]||[];
+  if(age<=0)return;
+  const g=Math.min(1,age/2.0),live=1-sstep(1.5,4.8,age),t=F.time,hz=STSL*.5,bot=top-.054;
+  // 1 仅下层板保持半透明雾面，绝不凝结为实体石块
+  dSurf(zc,bot,a*sstep(.25,2.0,age));
+  // 2 下层极淡细边
+  const lb=a*.22*sstep(.7,2.2,age);
+  if(lb>.004){
+    const c0=[-STW,bot,zc+hz],c1=[STW,bot,zc+hz],c2=[STW,bot,zc-hz],c3=[-STW,bot,zc-hz];
+    dLine(c0,c1,.36*lb,.56*lb,lb,.62);dLine(c1,c2,.36*lb,.56*lb,lb,.62);
+    dLine(c2,c3,.36*lb,.56*lb,lb,.62);dLine(c3,c0,.36*lb,.56*lb,lb,.62);
+  }
+  // 3 上层圆角蓝银发光轮廓线
+  const la=a*(.62+.20*live),lw=.98;
+  for(let s=0;s<=RSEG;s++){
+    const u=s/RSEG;rrect(u,zc,_o);
+    const ph=u*TAU*2+i*1.1-t*.85,wv=live*.012;
+    _r0[0]=_o[0];_r0[1]=top+wv*Math.sin(ph);_r0[2]=_o[1];
+    if(s>0&&u<=g+.04){
+      const tip=g<1?Math.exp(-Math.pow((g-u)*8,2)):0,bl=la*(1+1.3*tip);
+      dLine(_q0,_r0,.38*bl,.68*bl,bl,lw+.45*tip);
+    }
+    _q0[0]=_r0[0];_q0[1]=_r0[1];_q0[2]=_r0[2];
+  }
+  // 4 精准对齐每朵花萼正下方的渐变纤细弧茎（竖直垂出 → 水平切向融入上层边框，无尖角折线）
+  const NS=7;
+  for(let j=0;j<fl.length;j++){
+    const f=fl[j],fx=f[0],fz=f[1],fh=f[2],fsc=f[3],born=f[4],style=f[5];
+    const fg=sstep(0,1.4,F.time-born);if(fg<=.01)continue;
+    const y0=top+fh;                                                                         // 与着色器花萼完全重合
+    if(style===1){
+      // 中央花朵：一缕极细垂茎向下柔化淡出
+      for(let s=0;s<4;s++){
+        const u0=s/4,u1=(s+1)/4;if(u0>=fg)break;
+        const fade=(1-.75*u0)*a*.28*fg;
+        _a[0]=fx;_a[1]=y0-(fh+.02)*u0;_a[2]=fz;_b[0]=fx;_b[1]=y0-(fh+.02)*u1;_b[2]=fz;
+        dLine(_a,_b,.34*fade,.60*fade,fade,.48);
+      }
+      continue;
+    }
+    const ez=fz>=zc?zc+hz:zc-hz,spx=.20+.18*fsc;
+    const dirs=fx<-STW+.06?[1]:fx>STW-.06?[-1]:[-1,1];                                       // 靠外侧的花向内优雅拐入；其余左右对称分裂
+    for(const dir of dirs){
+      const tx=Math.max(-STW+.08,Math.min(STW-.08,fx+dir*spx));
+      const cx=fx,cy=top,cz=ez;                                                              // 控制点正下方与边框齐平：起端竖直、末端水平切向融合
+      for(let s=0;s<NS;s++){
+        const u0=s/NS,u1=(s+1)/NS;if(u0>=fg)break;
+        for(let e=0;e<2;e++){const q=e?u1:u0,m=1-q,P=e?_b:_a;
+          P[0]=m*m*fx+2*m*q*cx+q*q*tx;P[1]=m*m*y0+2*m*q*cy+q*q*top;P[2]=m*m*fz+2*m*q*cz+q*q*ez;}
+        const qm=(u0+u1)*.5;
+        const grad=(.24+.76*Math.pow(qm,.75))*(1-.32*Math.pow(1-qm,2));                      // 柔美渐变：近花萼极细微光，顺弧渐融于台阶上沿
+        const sb=a*.34*fg*grad,sw=.46+.24*qm;
+        dLine(_a,_b,.32*sb,.60*sb,sb,sw);
+      }
+    }
+  }
+}
+let flowVP=null;
+function seen(x,y,z){const V=flowVP,w=V[3]*x+V[7]*y+V[11]*z+V[15];if(w<.05)return false;const cx=(V[0]*x+V[4]*y+V[8]*z+V[12])/w,cy=(V[1]*x+V[5]*y+V[9]*z+V[13])/w;return Math.abs(cx)<1.12&&Math.abs(cy)<1.15;}
+function buildFlow(){
+  dlN=dsN=dtN=0;if(G.st<2||G.st>7)return;
+  const sp=(STZ-pl.z)/STD,isl=G.st>=4,i0=isl?Math.max(0,Math.ceil(Math.min(G.front,G.ie-2))):Math.max(0,Math.floor(sp)-7),i1=isl?G.ie+2:Math.min(NSTEP,Math.floor(Math.max(sp,-.5))+8);
+  if(G.ret&&(G.st===4||G.st===5)){const cur=Math.floor(sp);                                     // 孤岛的五级：看不见的时候才翻
+    for(let i=G.ie-2;i<=G.ie+2;i++){if(stepM[i]>=1||i===cur||i===G.ie)continue;const y=stepTop(i),zc=STZ-(i+.5)*STD;
+      if(!(seen(0,y,zc)||seen(-STW,y,zc-.2)||seen(STW,y,zc-.2)||seen(-STW,y,zc+.2)||seen(STW,y,zc+.2)||seen(0,y-.34,zc)||seen(0,y+.34,zc)))stepM[i]=1;}}
+  for(let i=i0;i<=i1;i++){
+    const d=Math.abs(i+.5-Math.max(sp,-.5)),near=sstep(7.5,3.4,d),inI=isl&&i>=G.ie-2;let a,k=sstep(2.2,.9,d);
+    if(G.st<=3)a=near*sstep(i,i+1.4,G.st===2?G.appear:99);
+    else if(inI){a=1;if(G.st!==4)k=0;}
+    else a=Math.max(near,.24/(1+d*.08));                                // 回程：花经过的地方，阶梯现形；越远越淡
+    a*=G.stA;k*=G.stA;if(a<.004)continue;
+    if(G.st>=5&&stepG[i]>-1e3){dGrown(i,a,0,sp);continue;}              // 花阶梯永远不凝成实体，保持半透明底板与细线花茎
+    a*=1-G.stepHide;k*=(1-G.stepHide)*(1-G.stepSolidHide);if(a<.004)continue;   // 进入孤岛后，实心先柔化、线框比皇宫更慢地淡出
+    const top=stepTop(i),z0=STZ-i*STD;
+    dBox([0,top-.03,z0-STD*.5],[STW,.03,STSL*.5],0,0,a*(.75+.5*k),k,1.15+.25*k);
+  }
+}
+function drawJellyBody(P,VP,sub=0){
+  const j=G.jelly,u=P.u;gl.uniformMatrix4fv(u.uVP,false,VP);gl.uniform1f(u.uTime,F.time);gl.uniform3fv(u.uSpine,j.spineF);gl.uniform1f(u.uC,j.c);gl.uniform1f(u.uM,j.m);gl.uniform1f(u.uSw,j.sw);
+  if(u.uSub)gl.uniform1f(u.uSub,sub);
+  gl.uniform3fv(u.uPos,j.p);gl.uniform3fv(u.uDir,j.d);gl.uniform1f(u.uScale,j.s);gl.bindVertexArray(mercVAO);gl.drawArraysInstanced(gl.TRIANGLES,0,ico.length/3,NMERC);
+}
+function drawFlow(VP,eye,proj){
+  flowVP=VP;buildFlow();
+  if(dsN){gl.disable(gl.BLEND);gl.depthMask(true);gl.useProgram(P_ss.p);gl.uniformMatrix4fv(P_ss.u.uVP,false,VP);gl.uniform3fv(P_ss.u.uCam,eye);gl.uniform3fv(P_ss.u.uL,Ldir);
+    gl.bindVertexArray(dsVAO);gl.bindBuffer(gl.ARRAY_BUFFER,dsBuf);gl.bufferSubData(gl.ARRAY_BUFFER,0,DS,0,dsN*7);gl.drawArrays(gl.TRIANGLES,0,dsN);}
+  if(dtN){gl.enable(gl.BLEND);gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ZERO,gl.ONE);gl.depthMask(false);
+    gl.useProgram(P_stSurf.p);gl.uniformMatrix4fv(P_stSurf.u.uVP,false,VP);
+    gl.bindVertexArray(dtVAO);gl.bindBuffer(gl.ARRAY_BUFFER,dtBuf);gl.bufferSubData(gl.ARRAY_BUFFER,0,DT,0,dtN*6);gl.drawArrays(gl.TRIANGLES,0,dtN);}
+  gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.depthMask(false);
+  if(dlN){gl.useProgram(P_sl.p);gl.uniformMatrix4fv(P_sl.u.uVP,false,VP);gl.uniform2f(P_sl.u.uRes,W,H);gl.uniform1f(P_sl.u.uWidth,Math.max(1.1,1.6*H/1080));
+    gl.bindVertexArray(dlVAO);gl.bindBuffer(gl.ARRAY_BUFFER,dlBuf);gl.bufferSubData(gl.ARRAY_BUFFER,0,DL,0,dlN*10);gl.drawArraysInstanced(gl.TRIANGLES,0,6,dlN);}
+  if(G.jelly.a>.002&&G.jelly.init&&G.jelly.sw<1.05){
+    const j=G.jelly,jd=Math.hypot(j.p[0]-eye[0],j.p[1]-eye[1],j.p[2]-eye[2]);
+    gl.useProgram(P_jelly.p);gl.uniform3fv(P_jelly.u.uCam,eye);gl.uniform1f(P_jelly.u.uAlpha,j.a*(.3+.7*sstep(16,5,jd))*(.5+.5*sstep(1.6,3.6,jd)));drawJellyBody(P_jelly,VP);
+  }
+  drawFlowers(FLOW_FL,VP,eye,2/(proj[5]*H),.72,1);
+}
+/* 流程里的字：环门中央那句钉在环心；水母留下的四段词如从深水中缓缓浮现（由模糊到清晰、微微上浮、字距呼吸） */
+function placeSay(VP){
+  const w=innerWidth,h=innerHeight,pr=p=>{const cw=VP[3]*p[0]+VP[7]*p[1]+VP[11]*p[2]+VP[15];if(cw<.2)return null;return[((VP[0]*p[0]+VP[4]*p[1]+VP[8]*p[2]+VP[12])/cw*.5+.5)*w,(.5-(VP[1]*p[0]+VP[5]*p[1]+VP[9]*p[2]+VP[13])/cw*.5)*h];};
+  const put=(el,p,a)=>{if(a<=.004||!p){if(el._a!==0){el.style.opacity=0;el._a=0;}return;}el._a=a;el.style.opacity=a.toFixed(3);el.style.transform='translate('+p[0].toFixed(1)+'px,'+p[1].toFixed(1)+'px) translate(-50%,-50%)';};
+  put(sayEl.ring,G.sayA>0?pr([0,10.6,-149.6]):null,G.sayA);
+  for(let i=0;i<ISLAND_WORDS.length;i++){
+    const wd=G.word[i],el=sayEl.isl[i],p=wd.a>.004?pr(wd.p):null;
+    if(!p||wd.a<=.004){if(el._a!==0){el.style.opacity=0;el._a=0;}continue;}
+    const em=sstep(0,2.6,wd.t),sink=sstep(8.2,13.2,wd.t);
+    const blur=(1-em)*11+sink*9;                                                             // 从深水模糊中浮清，消散时再晕回深水
+    const rise=(1-em)*22-sink*14,sway=Math.sin(F.time*.9+i*2.1)*3.2;                         // 缓慢上浮与微弱水流晃动
+    const sc=.91+.09*em+.04*sink,ls=.64-.20*em+.22*sink;                                     // 字距与尺度如水波呼吸
+    el._a=wd.a;el.style.opacity=wd.a.toFixed(3);
+    el.style.filter=blur>.15?'blur('+blur.toFixed(1)+'px)':'none';
+    el.style.letterSpacing=ls.toFixed(2)+'em';el.style.textIndent=ls.toFixed(2)+'em';
+    el.style.transform='translate('+(p[0]+sway).toFixed(1)+'px,'+(p[1]+rise).toFixed(1)+'px) translate(-50%,-50%) scale('+sc.toFixed(3)+')';
+  }
+}
+/* 宫殿在阶梯与孤岛上的样子：整体跟着玩家平移（不缩小不变形），消失由着色器在 case 4 缓慢晕染完成 */
+function palaceVP(VP){
+  if(G.st!==3&&G.st!==4)return VP;
+  const dy=pl.y-STY,dz=Math.min(0,pl.z-STZ);
+  return M4.mul(VP,new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,dy,dz,1]));
+}
 /* ───────────────────────── frame ───────────────────────── */
 function bindCommon(P,cam,VP,clip){
   const u=P.u;
@@ -1473,6 +2107,7 @@ function bindCommon(P,cam,VP,clip){
   if(u.uTime)gl.uniform1f(u.uTime,F.time);
   if(u.uForm)gl.uniform3f(u.uForm,pl.x,pl.z,F.formR);
   if(u.uEdge)gl.uniform1f(u.uEdge,ev.edge);
+  if(u.uGone)gl.uniform4f(u.uGone,G.goneZ,G.ring,G.cfDone?1:0,0);
   if(u.uSdf)gl.uniform1i(u.uSdf,1);
   if(u.uShadow)gl.uniform1i(u.uShadow,2);
   if(u.uEnv)gl.uniform1i(u.uEnv,3);
@@ -1484,14 +2119,29 @@ function drawSky(invVP,cam){gl.useProgram(P_sky.p);bindCommon(P_sky,cam,null,fal
 function drawMob(VP,cam,side){if(ev.mobA<=0)return;gl.useProgram(P_mob.p);bindCommon(P_mob,cam,VP,false);gl.uniform1f(P_mob.u.uSide,side);gl.bindVertexArray(mobVAO);gl.drawArrays(gl.TRIANGLES,0,mobCount);}
 function drawStrands(VP,cam,side,rw,rh,width){if(!ev.mobBorn)return;gl.useProgram(P_strand.p);bindCommon(P_strand,cam,VP,false);gl.uniform1f(P_strand.u.uSide,side);gl.uniform2f(P_strand.u.uRes,rw,rh);gl.uniform1f(P_strand.u.uWidth,width);
   gl.bindVertexArray(strandVAO);gl.drawArraysInstanced(gl.TRIANGLES,0,6,NST*NSEG);}
-function drawMerc(VP,cam,under){if(!entered)return;gl.useProgram(P_merc.p);bindCommon(P_merc,cam,VP,false);const u=P_merc.u;
+function drawMerc(VP,cam,under){if(!entered)return;
+  if(G.jelly.init){                                                                          // 水母与连廊里的水银浮游物始终是同一只：接管后只画它，不另画第二只
+    if(G.jelly.a>.002&&G.jelly.sw>0){gl.useProgram(P_jellyM.p);bindCommon(P_jellyM,cam,VP,false);
+      gl.uniform1f(P_jellyM.u.uUnderP,under);gl.uniform1f(P_jellyM.u.uNs,2.3);gl.uniform1f(P_jellyM.u.uDim,1);drawJellyBody(P_jellyM,VP,under);}
+    return;}
+  gl.useProgram(P_merc.p);bindCommon(P_merc,cam,VP,false);const u=P_merc.u;
   gl.uniform1f(u.uS,ev.mercS);gl.uniform1f(u.uG,ev.mercG);gl.uniform1f(u.uUnderP,under);gl.uniform1f(u.uNs,2.3);gl.uniform1f(u.uDim,1);
   gl.uniform4f(u.uRg,ev.ringC[0],ev.ringC[1],ev.ringC[2],ev.ring);
   gl.bindVertexArray(mercVAO);gl.drawArraysInstanced(gl.TRIANGLES,0,ico.length/3,NMERC);}
+function drawPlatFl(VP,cam,clip){
+  if(!G.cfDone)return;
+  gl.bindVertexArray(solidVAO);
+  gl.disable(gl.BLEND);gl.colorMask(false,false,false,false);gl.depthMask(true);gl.depthFunc(gl.LEQUAL);
+  gl.useProgram(P_platDepth.p);bindCommon(P_platDepth,cam,VP,clip);gl.drawArrays(gl.TRIANGLES,0,solidCount);
+  gl.colorMask(true,true,true,true);gl.depthMask(false);gl.depthFunc(gl.EQUAL);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+  gl.useProgram(P_platFl.p);bindCommon(P_platFl,cam,VP,clip);gl.drawArrays(gl.TRIANGLES,0,solidCount);
+  gl.disable(gl.BLEND);gl.depthFunc(gl.LEQUAL);gl.depthMask(true);
+}
 function drawSolids(VP,cam,clip){
   gl.useProgram(P_solid.p);bindCommon(P_solid,cam,VP,clip);gl.bindVertexArray(solidVAO);gl.drawArrays(gl.TRIANGLES,0,solidCount);
   drawMerc(VP,cam,0);
-  if(enterT>3){gl.useProgram(P_mmt.p);bindCommon(P_mmt,cam,VP,false);const u=P_mmt.u;gl.uniformMatrix4fv(u.uInvVP,false,M4.inv(VP));gl.uniform1f(u.uNs,.045);gl.uniform1f(u.uDim,.5*Math.min(1,(enterT-3)/14));gl.uniform4fv(u.uW,ev.mmW);gl.bindVertexArray(emptyVAO);gl.drawArrays(gl.TRIANGLES,0,3);}
+  if(enterT>3&&G.farV>.003){gl.useProgram(P_mmt.p);bindCommon(P_mmt,cam,VP,false);const u=P_mmt.u;gl.uniformMatrix4fv(u.uInvVP,false,M4.inv(VP));gl.uniform1f(u.uNs,.045);gl.uniform1f(u.uDim,.5*Math.min(1,(enterT-3)/14)*G.farV);gl.uniform4fv(u.uW,ev.mmW);gl.bindVertexArray(emptyVAO);gl.drawArrays(gl.TRIANGLES,0,3);}
   if(!clip)drawMob(VP,cam,1);        // 环不进倒影：镜面对它不是镜子，是切面，下面那一半是真的
 }
 function drawOcc(VP,clip){           // 远景的遮挡体：只写深度
@@ -1505,7 +2155,7 @@ function drawPal(VP,gain){if(ev.palT<0||!palReady)return;gl.useProgram(P_pal.p);
   for(const k in PALU){bindTex(PALU[k][1],palTex[PALU[k][0]]);gl.uniform1i(u[k],PALU[k][1]);}
   const tau=Math.min(1.06,Math.max(0,(t-7)/32)),F0=.03,F1=.5,q=Math.min(1,Math.max(0,(tau-F0)/(F1-F0)));
   const fy=Math.max(M.S1Y+130*sstep(4,8.5,t),M.S1Y+(M.FY-M.S1Y)*(q*q*(3-2*q)*.75+q*.25)),fx=M.AX+20*Math.sin(t*.42)*Math.sin(Math.PI*q);   // 雪花：沿一条轻轻摆动的线沉下去，先慢、中段快、落定前又慢
-  gl.uniformMatrix4fv(u.uVP,false,VP);gl.uniform1f(u.uTime,F.time);gl.uniform1f(u.uGain,gain);
+  gl.uniformMatrix4fv(u.uVP,false,VP);gl.uniform1f(u.uTime,F.time);gl.uniform1f(u.uGain,gain);gl.uniform1f(u.uDis,(G.st===3||G.st===4)?G.far:0);
   gl.uniform4f(u.uA,tau,Math.min(1.1,Math.max(0,(t-.8)/9.5)),sstep(11,25,t),t);
   gl.uniform4f(u.uFk,fx,fy,Math.max(0,Math.min(.72,(t-4.5)/13))+.4*sstep(22.5,27,t),sstep(24,31,t));
   gl.uniform4f(u.uB,sstep(29,44,t),sstep(5,8.5,t)*(1-sstep(21,26,t)),1.3-.3*sstep(0,.8,q),1.5-.5*sstep(7,19,t));
@@ -1533,7 +2183,7 @@ function frame(ms,bench){
   resize(false);
   if(!dbg.freeze){F.time+=dt;updatePlayer(dt);if(entered)enterT+=dt;updateEvents(dt,F.time);}
   fade=Math.min(1,fade+dt*.6);
-  F.formR=entered?sstep(0,7,enterT):0;                                           // 入场之后，实体从脚下向外长出来
+  F.formR=entered?sstep(0,7,enterT)*G.formK:0;                                   // 入场之后，实体从脚下向外长出来；回程时 formK 让连廊先只有线稿
 
   // 相机
   const bobY=Math.sin(pl.bob*2)*.028,eye=[pl.x,pl.y+1.68+bobY,pl.z];
@@ -1541,6 +2191,8 @@ function frame(ms,bench){
   const fov=68;
   const proj=M4.persp(fov*Math.PI/180,W/H,NEAR,FAR),view=M4.view(eye,fw,[0,1,0]),VP=M4.mul(proj,view),invVP=M4.inv(VP),invP=M4.inv(proj);
   if(!ti.done)placeSig(VP);
+  placeSay(VP);
+  const dark=G.dim>.999||G.dk>.999,dimming=G.dim>0||G.dk>0,wet=G.water>.001&&!dark,palVP=palaceVP(VP);   // dark：世界已经完全暗下去，不必再画；wet：水面还在
   // 镜像相机
   const eyeR=[eye[0],-eye[1],eye[2]],flipY=new Float32Array([1,0,0,0, 0,-1,0,0, 0,0,1,0, 0,0,0,1]),viewR=M4.mul(view,flipY),VPR=M4.mul(proj,viewR);
   // 光源矩阵：跟随玩家，按纹素对齐
@@ -1555,25 +2207,26 @@ function frame(ms,bench){
   bindTex(2,null);
   gl.bindFramebuffer(gl.FRAMEBUFFER,shadowFBO);gl.viewport(0,0,SHN,SHN);gl.clear(gl.DEPTH_BUFFER_BIT);
   gl.useProgram(P_depth.p);bindCommon(P_depth,null,F.lightVP,false);
-  gl.enable(gl.POLYGON_OFFSET_FILL);gl.polygonOffset(1.5,2);gl.bindVertexArray(solidVAO);gl.drawArrays(gl.TRIANGLES,0,solidCount);gl.disable(gl.POLYGON_OFFSET_FILL);
+  gl.enable(gl.POLYGON_OFFSET_FILL);gl.polygonOffset(1.5,2);gl.bindVertexArray(solidVAO);if(!dark)gl.drawArrays(gl.TRIANGLES,0,solidCount);gl.disable(gl.POLYGON_OFFSET_FILL);
   bindTex(2,shadowTex);
 
   // 2 倒影（半分辨率，镜像相机）：实体、远景的遮挡体、线，画进同一张；地面采样时再把它整体柔化
   gl.bindFramebuffer(gl.FRAMEBUFFER,T.reflF);gl.viewport(0,0,T.hw,T.hh);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
-  drawSolids(VPR,eyeR,true);drawOcc(VPR,true);
-  gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.depthMask(false);drawLines(VPR,eyeR,true,T.hw,T.hh,1.2,hsh>1?.27:.5);drawPal(VPR,.75);drawGarden(VPR,eyeR,2/(proj[5]*T.hh),T.hh);gl.depthMask(true);gl.disable(gl.BLEND);
+  if(wet){drawSolids(VPR,eyeR,true);drawPlatFl(VPR,eyeR,true);drawOcc(VPR,true);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.depthMask(false);drawLines(VPR,eyeR,true,T.hw,T.hh,1.2,hsh>1?.27:.5);drawPal(palaceVP(VPR),.75*G.palGain);drawGarden(VPR,eyeR,2/(proj[5]*T.hh),T.hh);gl.depthMask(true);gl.disable(gl.BLEND);}
   bindTex(4,T.tex.refl);gl.generateMipmap(gl.TEXTURE_2D);
   // 2b 镜面之下（半分辨率，主相机）：莫比乌斯环的下半与潜下去的水银
   gl.bindFramebuffer(gl.FRAMEBUFFER,T.underF);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
-  drawMob(VP,eye,-1);if(ev.glow[3]>0)drawMerc(VP,eye,1);
-  gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.depthMask(false);drawStrands(VP,eye,-1,T.hw,T.hh,1.1);gl.depthMask(true);gl.disable(gl.BLEND);
+  if(wet){drawMob(VP,eye,-1);if(ev.glow[3]>0||(G.jelly.init&&G.jelly.sw>0&&G.jelly.p[1]<1.8))drawMerc(VP,eye,1);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.depthMask(false);drawStrands(VP,eye,-1,T.hw,T.hh,1.1);gl.depthMask(true);gl.disable(gl.BLEND);}
   gl.clearColor(0,0,0,1);
 
   // 3 主场景
   gl.bindFramebuffer(gl.FRAMEBUFFER,T.sceneF);gl.viewport(0,0,W,H);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
-  drawSky(invVP,eye);drawSolids(VP,eye,false);
-  {gl.useProgram(P_water.p);bindCommon(P_water,eye,VP,false);bindTex(4,T.tex.refl);bindTex(9,T.tex.under);gl.uniform1i(P_water.u.uRefl,4);gl.uniform1i(P_water.u.uUnder,9);gl.uniform2f(P_water.u.uRes,W,H);gl.uniform4fv(P_water.u.uStk,ev.stk);gl.uniform1f(P_water.u.uRL,hsh>1?.1:1.1);
-    gl.bindVertexArray(waterVAO);gl.drawArrays(gl.TRIANGLES,0,6);}
+  if(!dark){drawSky(invVP,eye);drawSolids(VP,eye,false);}
+  if(wet){gl.useProgram(P_water.p);bindCommon(P_water,eye,VP,false);bindTex(4,T.tex.refl);bindTex(9,T.tex.under);gl.uniform1i(P_water.u.uRefl,4);gl.uniform1i(P_water.u.uUnder,9);gl.uniform2f(P_water.u.uRes,W,H);gl.uniform4fv(P_water.u.uStk,ev.stk);gl.uniform1f(P_water.u.uWA,G.water);gl.uniform1f(P_water.u.uRL,hsh>1?.1:1.1);
+    if(G.water<1){gl.enable(gl.BLEND);gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ZERO,gl.ONE);}
+    gl.bindVertexArray(waterVAO);gl.drawArrays(gl.TRIANGLES,0,6);gl.disable(gl.BLEND);}
 
   // 4 环境光遮蔽（半分辨率），乘回场景
   gl.disable(gl.DEPTH_TEST);
@@ -1581,12 +2234,13 @@ function frame(ms,bench){
   fsq(P_aoApply,T.colorF,W,H);bindTex(5,T.tex.ao);gl.uniform1i(P_aoApply.u.uAO,5);gl.uniform2f(P_aoApply.u.uTx,.75/T.hw,.75/T.hh);
   gl.enable(gl.BLEND);gl.blendFunc(gl.DST_COLOR,gl.ZERO);gl.drawArrays(gl.TRIANGLES,0,3);gl.disable(gl.BLEND);
 
-  // 5 远景的遮挡体写进深度，然后是加色的一层：虚影、线稿、环的丝、雪、飞鸟
+  // 5 远景的遮挡体写进深度，然后是被花朵同化的半透明高台/石阶，以及加色的一层：虚影、线稿、环的丝、雪、飞鸟
   gl.bindFramebuffer(gl.FRAMEBUFFER,T.sceneF);gl.viewport(0,0,W,H);gl.enable(gl.DEPTH_TEST);
   drawOcc(VP,false);
+  if(!dark)drawPlatFl(VP,eye,false);
   gl.enable(gl.BLEND);gl.depthMask(false);gl.blendFunc(gl.ONE,gl.ONE);
   const lw=Math.max(1.05,1.45*H/1080);
-  {
+  if(!dark){
     gl.useProgram(P_ghost.p);bindCommon(P_ghost,eye,VP,false);gl.bindVertexArray(solidVAO);gl.drawArrays(gl.TRIANGLES,0,solidCount);
     drawLines(VP,eye,false,W,H,lw,1.0);
     drawStrands(VP,eye,1,W,H,lw*.72);
@@ -1595,12 +2249,15 @@ function frame(ms,bench){
     if(ev.bf>=1){gl.uniform3f(P_bird.u.uJit,0,0,1);gl.drawArraysInstanced(gl.TRIANGLES,0,birdVN,NBIRD);}
     else for(const j of BIRD_JIT){gl.uniform3fv(P_bird.u.uJit,j);gl.drawArraysInstanced(gl.TRIANGLES,0,birdVN,NBIRD);}
     drawGarden(VP,eye,2/(proj[5]*H),H);
+    if(dimming){gl.disable(gl.DEPTH_TEST);gl.blendFunc(gl.ZERO,gl.SRC_COLOR);gl.bindVertexArray(emptyVAO);dimPass(invVP,eye);gl.blendFunc(gl.ONE,gl.ONE);gl.enable(gl.DEPTH_TEST);}   // 5b 流程：把世界压暗
   }
-  drawPal(VP,1);
+  drawPal(palVP,G.palGain);          // 宫殿、阶梯、花在压暗之后才画：它们是黑暗里仅有的参照
+  drawFlow(VP,eye,proj);
   gl.depthMask(true);gl.disable(gl.BLEND);gl.disable(gl.DEPTH_TEST);
 
   // 6 体积光（半分辨率）
   fsq(P_vol,T.volF,T.hw,T.hh);bindTex(5,T.tex.depth);gl.uniform1i(P_vol.u.uDepth,5);gl.uniform1i(P_vol.u.uShadow,2);gl.uniform1i(P_vol.u.uSdf,1);gl.uniformMatrix4fv(P_vol.u.uLightVP,false,F.lightVP);gl.uniformMatrix4fv(P_vol.u.uInvVP,false,invVP);gl.uniform3fv(P_vol.u.uCam,eye);gl.uniform3fv(P_vol.u.uL,Ldir);gl.drawArrays(gl.TRIANGLES,0,3);
+  if(dimming){gl.enable(gl.BLEND);gl.blendFunc(gl.ZERO,gl.SRC_COLOR);dimPass(invVP,eye);gl.disable(gl.BLEND);}
 
   // 7 Bloom 金字塔
   const B=T.bloom;
@@ -1618,17 +2275,24 @@ function frame(ms,bench){
 }
 window.addEventListener('resize',()=>resize(false));
 // 调试/截图接口
-function jump(to){                     // 调试：#flow 宫殿刚长成
+function jump(to){                     // 调试：#flow 宫殿刚长成 / #stair 阶梯已出现 / #dark 全黑、话语开始 / #far 宫殿开始飘远 / #island 孤岛 / #return 花开始蔓延 / #back 连廊已重现
   ti.t=9;hideTitle();if(!entered)startScene();fade=1;enterT=Math.max(enterT,40);ev.mobBorn=true;ev.mobG=1.7;
-  pl.x=0;pl.z=-143;pl.y=2.4;pl.yaw=0;pl.pitch=.2;ev.palT=46;
+  pl.x=0;pl.z=-143;pl.y=2.4;pl.yaw=0;pl.pitch=.2;ev.palT=46;if(to==='flow')return;
+  G.st=3;G.ring=1;G.appear=7;G.stair=true;G.hi=NSTEP;G.lo=-3;G.maxS=-9;G.goneZ=1e4;G.dk=0;G.dim=0;G.far=0;G.palGain=1;G.palGone=false;G.palDis=false;G.palDisT=0;G.ret=false;G.stepHide=0;G.stepSolidHide=0;G.jelly.init=false;G.jelly.a=0;pl.z=-149.4;if(to==='stair')return;
+  const S=to==='dark'?S_DARK+2:to==='far'?S_FAR-1:S_FAR+.5;G.maxS=S;pl.z=STZ-(S+.5)*STD;pl.y=stepUp[Math.floor(S)];updateFlow(0);if(to==='dark'||to==='far')return;
+  if(to==='island')return;
+  G.palDis=true;G.palDisT=PAL_DUR+12;if(!G.jelly.init)initJelly([pl.x+2,pl.y+2.2,pl.z+4],[0,0,1]);G.jelly.a=1;
+  pl.yaw=Math.PI;G.t=28;Object.assign(G.jelly,{mode:2,mT:9,side:1});updateFlow(.1);if(to==='return')return;
+  for(let i=0;i<=NSTEP;i++)stepM[i]=1;while(G.st===5){F.time+=.1;updateFlow(.1);}G.t=8;
 }
 if(location.hash.length>1)setTimeout(()=>jump(location.hash.slice(1)),600);
-window.__palace={pl,ev,dbg,F,ti,jump,
+window.__palace={pl,ev,dbg,F,ti,G,jump,flowers:()=>FLOW_FL.n,
   enter(){ti.t=9;hideTitle();if(!entered)startScene();},
   skip(s=30){fade=1;enterT+=s;},
   tick(sec){for(let i=0;i<sec*20;i++){F.time+=.05;if(entered)enterT+=.05;updateEvents(.05,F.time);}},
+  sim(sec,dt=.05,walk=0){dbg.manual=true;for(let i=0;i<sec/dt;i++){pl.z+=walk*dt;F.time+=dt;updatePlayer(dt);if(entered)enterT+=dt;updateEvents(dt,F.time);}},   // 只推进逻辑、不画
   bench(n){const px=new Uint8Array(4),t=performance.now();for(let i=0;i<n;i++)frame(performance.now(),true);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);return(performance.now()-t)/n;},
-  setScale(s,h=1){dbg.fixed=true;scale=s;hsh=h;},tier:()=>scaleIdx,garden:()=>({SPAWN_FL,GARD}),
+  setScale(s,h=1){dbg.fixed=true;scale=s;hsh=h;},tier:()=>scaleIdx,garden:()=>({SPAWN_FL,GARD,FLOW_FL}),
   run(sec,dt=1/30){dbg.manual=true;const n=Math.round(sec/dt);for(let i=0;i<n;i++)frame((last+dt)*1000,true);},stats:()=>({solidTris:solidCount/3,lines:lineCount,occTris:occCount/3,W,H,scale,HDR})};
 try{resize(true);requestAnimationFrame(frame);}catch(e){console.error(e);fatal('渲染初始化失败：'+e.message);}
 })();
